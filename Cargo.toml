@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "fdb",
+    "fdb-gen",
+    "fdb-sys"
+]

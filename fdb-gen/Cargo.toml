@@ -1,0 +1,19 @@
+[package]
+name = "fdb-gen"
+version = "0.1.0"
+edition = "2018"
+authors = [
+    "Jihyun Yu <yjh0502@gmail.com>",
+    "Vincent Rouillé <vincent@clikengo.com>",
+]
+description = """
+Binding generation helper for FoundationDB
+"""
+
+[features]
+default = []
+
+fdb-6_3 = []
+
+[dependencies]
+xml-rs = "0.8.3"
