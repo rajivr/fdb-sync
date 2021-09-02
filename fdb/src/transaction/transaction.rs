@@ -1,5 +1,6 @@
 use crate::database::Database;
 use crate::future::FdbFutureUnit;
+use crate::range::Range;
 use crate::transaction::ReadTransaction;
 use crate::{FdbError, Key, Value};
 
@@ -52,6 +53,12 @@ pub trait Transaction: ReadTransaction {
 
     /// Cancels the [`Transaction`].
     fn cancel(&self);
+
+    /// Clears a given key from the database.
+    fn clear(&self, key: Key);
+
+    /// Clears a range of keys from the database.
+    fn clear_range(&self, range: Range);
 
     /// Commit this [`Transaction`].
     fn commit(&self) -> FdbFutureUnit;

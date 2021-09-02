@@ -2,7 +2,8 @@
 //! working with FDB Future.
 
 use crate::error::check;
-use crate::{FdbResult, Key, Value};
+use crate::range::KeyValueArray;
+use crate::{FdbResult, Key, KeyValue, Value};
 use bytes::Bytes;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -95,6 +96,27 @@ impl FdbFutureGet for i64 {
 /// [`Key`] from a database.
 pub type FdbFutureKey = FdbFuture<Key>;
 
+impl FdbFutureGet for Key {
+    unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<Key> {
+        let mut out_key = ptr::null();
+        let mut out_key_length = 0;
+
+        check(fdb_sys::fdb_future_get_key(
+            future,
+            &mut out_key,
+            &mut out_key_length,
+        ))
+        .map(|_| {
+            Bytes::copy_from_slice(if out_key_length == 0 {
+                &b""[..]
+            } else {
+                slice::from_raw_parts(out_key, out_key_length.try_into().unwrap())
+            })
+            .into()
+        })
+    }
+}
+
 /// Represents the asynchronous result of a function that *maybe* returns a
 /// key [`Value`] from a database.
 pub type FdbFutureMaybeValue = FdbFuture<Option<Value>>;
@@ -128,9 +150,51 @@ impl FdbFutureGet for Option<Value> {
     }
 }
 
+pub(crate) type FdbFutureKeyValueArray = FdbFuture<KeyValueArray>;
+
+impl FdbFutureGet for KeyValueArray {
+    unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<KeyValueArray> {
+        let mut out_kv = ptr::null();
+        let mut out_count = 0;
+        let mut out_more = 0;
+
+        check(fdb_sys::fdb_future_get_keyvalue_array(
+            future,
+            &mut out_kv,
+            &mut out_count,
+            &mut out_more,
+        ))
+        .map(|_| {
+            let mut kv_list = Vec::with_capacity(out_count.try_into().unwrap());
+
+            (0..out_count).into_iter().for_each(|i| {
+                let kv = out_kv.offset(i.try_into().unwrap());
+
+                let key = Bytes::copy_from_slice(slice::from_raw_parts(
+                    (*kv).key,
+                    (*kv).key_length.try_into().unwrap(),
+                ))
+                .into();
+
+                let value = Bytes::copy_from_slice(slice::from_raw_parts(
+                    (*kv).value,
+                    (*kv).value_length.try_into().unwrap(),
+                ))
+                .into();
+
+                kv_list.push(KeyValue::new(key, value));
+            });
+
+            KeyValueArray::new(kv_list, if out_more == 0 { false } else { true })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FdbFutureI64, FdbFutureMaybeValue, FdbFutureUnit};
+    use super::{
+        FdbFutureI64, FdbFutureKey, FdbFutureKeyValueArray, FdbFutureMaybeValue, FdbFutureUnit,
+    };
     use impls::impls;
 
     #[test]
@@ -153,7 +217,23 @@ mod tests {
 
         #[rustfmt::skip]
 	assert!(impls!(
+	    FdbFutureKey:
+	        !Copy &
+		!Clone &
+		!Send &
+		!Sync));
+
+        #[rustfmt::skip]
+	assert!(impls!(
 	    FdbFutureMaybeValue:
+	        !Copy &
+		!Clone &
+		!Send &
+		!Sync));
+
+        #[rustfmt::skip]
+	assert!(impls!(
+	    FdbFutureKeyValueArray:
 	        !Copy &
 		!Clone &
 		!Send &

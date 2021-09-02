@@ -1,5 +1,5 @@
 //! Provides types and traits for working with FDB Transactions and
-//! Shapshots
+//! Snapshots.
 
 mod fdb_transaction;
 mod read_transaction;

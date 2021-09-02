@@ -42,9 +42,36 @@ impl FdbScope {
                 writeln!(w, "///")?;
                 writeln!(w, "/// [`Transaction`]: crate::transaction::Transaction")?;
             }
-            "StreamingMode" => writeln!(w, "/// TODO")?,
+            "StreamingMode" => {
+                writeln!(
+                    w,
+                    "/// Options that control the way the Rust binding performs range reads."
+                )?;
+                writeln!(w, "///")?;
+                writeln!(
+                    w,
+                    "/// These options can be passed to [`get_range`] method."
+                )?;
+                writeln!(w, "///")?;
+                writeln!(
+                    w,
+                    "/// [`get_range`]: crate::transaction::ReadTransaction::get_range"
+                )?;
+            }
             "MutationType" => writeln!(w, "/// TODO")?,
-            "ConflictRangeType" => writeln!(w, "/// TODO")?,
+            "ConflictRangeType" => {
+                writeln!(
+                    w,
+                    "/// An enumeration of available conflict range types to be passed to `fdb_sys::fdb_transaction_add_conflict_range`."
+                )?;
+                writeln!(w, "///")?;
+                writeln!(
+                    w,
+                    "/// This API is not directly exposed to the user. See [`FDBConflictRangeType`] C API for details."
+                )?;
+                writeln!(w, "///")?;
+                writeln!(w, "/// [`FDBConflictRangeType`]: https://apple.github.io/foundationdb/api-c.html#c.FDBConflictRangeType")?;
+            }
             "ErrorPredicate" => writeln!(w, "/// TODO")?,
             ty => panic!("unknown Scope name: `{}`", ty),
         }
@@ -55,7 +82,11 @@ impl FdbScope {
         }
         writeln!(w, "#[allow(dead_code, missing_docs)]")?;
         writeln!(w, "#[non_exhaustive]")?;
-        writeln!(w, "pub enum {name} {{", name = self.name)?;
+        if self.name == "ConflictRangeType" {
+            writeln!(w, "pub(crate) enum {name} {{", name = self.name)?;
+        } else {
+            writeln!(w, "pub enum {name} {{", name = self.name)?;
+        }
 
         let with_ty = self.with_ty();
         for option in self.options.iter() {

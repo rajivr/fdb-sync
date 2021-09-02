@@ -26,12 +26,14 @@ mod option;
 
 pub mod database;
 pub mod future;
+pub mod range;
 pub mod transaction;
 
 pub use crate::error::{FdbError, FdbResult};
 
 pub use crate::fdb::{
-    select_api_version, set_network_option, start_network, stop_network, Key, Value,
+    select_api_version, set_network_option, start_network, stop_network, Key, KeySelector,
+    KeyValue, Value,
 };
 
 pub use crate::database::open_database::open_database;
@@ -39,7 +41,5 @@ pub use crate::database::open_database::open_database;
 pub use crate::option::NetworkOption;
 
 // TODO: See it these options actually belong here?
-pub use crate::option::ConflictRangeType;
 pub use crate::option::ErrorPredicate;
 pub use crate::option::MutationType;
-pub use crate::option::StreamingMode;

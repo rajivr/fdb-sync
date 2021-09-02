@@ -30,7 +30,7 @@ where
     // `path_ptr` is valid till we do `drop(path)`.
     let path_ptr = path.as_ptr();
 
-    let mut v: *mut fdb_sys::FDBDatabase = ptr::null_mut();
+    let mut v = ptr::null_mut();
 
     let err = unsafe { fdb_sys::fdb_create_database(path_ptr, &mut v) };
 
