@@ -1,8 +1,10 @@
 use crate::database::Database;
-use crate::future::FdbFutureUnit;
+use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureUnit};
 use crate::range::Range;
-use crate::transaction::ReadTransaction;
-use crate::{FdbError, Key, Value};
+use crate::transaction::{MutationType, ReadTransaction};
+use crate::{FdbError, FdbResult, Key, Value};
+
+use bytes::Bytes;
 
 /// A [`Transaction`] represents a FDB database transaction.
 ///
@@ -51,6 +53,22 @@ pub trait Transaction: ReadTransaction {
     /// [`Database`] associated with the [`Transaction`].
     type Database: Database;
 
+    /// Adds a key to the transaction's read conflict ranges as if you
+    /// had read the key.
+    fn add_read_conflict_key(&self, key: Key) -> FdbResult<()>;
+
+    /// Adds a range of keys to the transaction's read conflict ranges
+    /// as if you had read the range.
+    fn add_read_conflict_range(&self, range: Range) -> FdbResult<()>;
+
+    /// Adds a key to the transaction's write conflict ranges as if
+    /// you had written the key.
+    fn add_write_conflict_key(&self, key: Key) -> FdbResult<()>;
+
+    /// Adds a range of keys to the transaction's write conflict
+    /// ranges as if you had cleared the range.
+    fn add_write_conflict_range(&self, range: Range) -> FdbResult<()>;
+
     /// Cancels the [`Transaction`].
     fn cancel(&self);
 
@@ -63,12 +81,31 @@ pub trait Transaction: ReadTransaction {
     /// Commit this [`Transaction`].
     fn commit(&self) -> FdbFutureUnit;
 
+    /// Returns a future that will contain the approximated size of
+    /// the commit, which is the summation of mutations, read conflict
+    /// ranges, and write conflict ranges.
+    fn get_approximate_size(&self) -> FdbFutureI64;
+
+    /// Gets the version number at which a successful commit modified
+    /// the database.
+    fn get_committed_version(&self) -> FdbResult<i64>;
+
     /// Returns the [`Database`] that this [`Transaction`] is
     /// interacting with.
     //
     // NOTE: `FdbDatabase` is `Arc` counted, so we don't have to worry
     //        about issuing a new copy.
     fn get_database(&self) -> Self::Database;
+
+    /// Returns a future which will contain the versionstamp which was
+    /// used by any versionstamp operations in this transaction.
+    fn get_versionstamp(&self) -> FdbFutureKey;
+
+    /// An atomic operation is a single database command that carries
+    /// out several logical steps: reading the value of a key,
+    /// performing a transformation on that value, and writing the
+    /// result.
+    fn mutate(&self, optype: MutationType, key: Key, param: Bytes);
 
     /// Determines whether an error returned by a [`Transaction`]
     /// method is retryable. Waiting on the returned future will
@@ -94,4 +131,11 @@ pub trait Transaction: ReadTransaction {
     ///
     /// [`snapshot reads`]: https://apple.github.io/foundationdb/developer-guide.html#snapshot-reads
     fn snapshot(&self) -> &dyn ReadTransaction;
+
+    /// Creates a watch that will become ready when it reports a
+    /// change to the value of the specified key.
+    ///
+    /// A watch's behavior is relative to the transaction that created
+    /// it.
+    fn watch(&self, key: Key) -> FdbFutureUnit;
 }

@@ -7,6 +7,7 @@ mod read_transaction_context;
 mod transaction;
 mod transaction_context;
 
+pub use crate::option::MutationType;
 pub use crate::option::TransactionOption;
 
 pub use fdb_transaction::FdbTransaction;

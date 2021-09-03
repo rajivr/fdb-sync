@@ -72,6 +72,10 @@ pub trait ReadTransaction {
     /// [`Transaction`]: crate::transaction::Transaction
     fn get_read_version(&self) -> FdbFutureI64;
 
+    /// Gets whether this transaction is a snapshot view of the
+    /// database.
+    fn is_snapshot(&self) -> bool;
+
     /// Set options on a [`Transaction`].
     ///
     /// [`Transaction`]: crate::transaction::Transaction

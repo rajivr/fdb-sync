@@ -39,7 +39,3 @@ pub use crate::fdb::{
 pub use crate::database::open_database::open_database;
 
 pub use crate::option::NetworkOption;
-
-// TODO: See it these options actually belong here?
-pub use crate::option::ErrorPredicate;
-pub use crate::option::MutationType;

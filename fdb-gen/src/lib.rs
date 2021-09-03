@@ -58,7 +58,19 @@ impl FdbScope {
                     "/// [`get_range`]: crate::transaction::ReadTransaction::get_range"
                 )?;
             }
-            "MutationType" => writeln!(w, "/// TODO")?,
+            "MutationType" => {
+		writeln!(w, "/// A set of operations that can be performed atomically on a database.")?;
+                writeln!(w, "///")?;
+                writeln!(
+                    w,
+                    "/// These options can be passed to [`mutate`] method."
+                )?;
+                writeln!(w, "///")?;
+                writeln!(
+                    w,
+                    "/// [`mutate`]: crate::transaction::Transaction::mutate"
+                )?;
+	    }
             "ConflictRangeType" => {
                 writeln!(
                     w,
@@ -82,7 +94,7 @@ impl FdbScope {
         }
         writeln!(w, "#[allow(dead_code, missing_docs)]")?;
         writeln!(w, "#[non_exhaustive]")?;
-        if self.name == "ConflictRangeType" {
+        if self.name == "ConflictRangeType" || self.name == "ErrorPredicate" {
             writeln!(w, "pub(crate) enum {name} {{", name = self.name)?;
         } else {
             writeln!(w, "pub enum {name} {{", name = self.name)?;

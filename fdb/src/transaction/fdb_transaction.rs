@@ -1,11 +1,14 @@
 use crate::database::FdbDatabase;
+use crate::error::check;
 use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
 use crate::option::ConflictRangeType;
 use crate::range::{fdb_transaction_get_range, Range, RangeOptions, RangeResult};
 use crate::transaction::{
-    ReadTransaction, ReadTransactionContext, Transaction, TransactionContext, TransactionOption,
+    MutationType, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
+    TransactionOption,
 };
 use crate::{FdbError, FdbResult, Key, KeySelector, Value};
+
 use bytes::Bytes;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -65,16 +68,16 @@ impl ReadTransactionContext for FdbTransaction {
 impl ReadTransaction for FdbTransaction {
     fn add_read_conflict_key_if_not_snapshot(&self, key: Key) -> FdbResult<()> {
         let begin_key = key;
-        // add a 0x00 to `begin_key` as `begin_key` is inclusive and
-        // `end_key` is exclusive. By appending `0x00` to `begin_key`
-        // we can make the range contain only `begin_key`.
+        // Add a 0x00 to `end_key`. `begin_key` is inclusive and
+        // `end_key` is exclusive. By appending `0x00` to `end_key` we
+        // can make the range contain only `begin_key`.
         let end_key =
             Bytes::from([&(*(Bytes::from(begin_key.clone()))), &[0x00u8]].concat()).into();
 
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
-        internal::read_transaction::add_conflict_range(
+        internal::add_conflict_range(
             (self.c_ptr.unwrap()).as_ptr(),
             begin_key,
             end_key,
@@ -88,7 +91,7 @@ impl ReadTransaction for FdbTransaction {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
-        internal::read_transaction::add_conflict_range(
+        internal::add_conflict_range(
             (self.c_ptr.unwrap()).as_ptr(),
             begin,
             end,
@@ -161,6 +164,10 @@ impl ReadTransaction for FdbTransaction {
         internal::read_transaction::get_read_version((self.c_ptr.unwrap()).as_ptr())
     }
 
+    fn is_snapshot(&self) -> bool {
+        false
+    }
+
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -190,6 +197,72 @@ impl TransactionContext for FdbTransaction {
 
 impl Transaction for FdbTransaction {
     type Database = FdbDatabase;
+
+    fn add_read_conflict_key(&self, key: Key) -> FdbResult<()> {
+        let begin_key = key;
+        // Add a 0x00 to `end_key`. `begin_key` is inclusive and
+        // `end_key` is exclusive. By appending `0x00` to `end_key` we
+        // can make the range contain only `begin_key`.
+        let end_key =
+            Bytes::from([&(*(Bytes::from(begin_key.clone()))), &[0x00u8]].concat()).into();
+
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        internal::add_conflict_range(
+            (self.c_ptr.unwrap()).as_ptr(),
+            begin_key,
+            end_key,
+            ConflictRangeType::Read,
+        )
+    }
+
+    fn add_read_conflict_range(&self, range: Range) -> FdbResult<()> {
+        let (begin, end) = range.destructure();
+
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        internal::add_conflict_range(
+            (self.c_ptr.unwrap()).as_ptr(),
+            begin,
+            end,
+            ConflictRangeType::Read,
+        )
+    }
+
+    fn add_write_conflict_key(&self, key: Key) -> FdbResult<()> {
+        let begin_key = key;
+        // Add a 0x00 to `end_key`. `begin_key` is inclusive and
+        // `end_key` is exclusive. By appending `0x00` to `end_key` we
+        // can make the range contain only `begin_key`.
+        let end_key =
+            Bytes::from([&(*(Bytes::from(begin_key.clone()))), &[0x00u8]].concat()).into();
+
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        internal::add_conflict_range(
+            (self.c_ptr.unwrap()).as_ptr(),
+            begin_key,
+            end_key,
+            ConflictRangeType::Write,
+        )
+    }
+
+    fn add_write_conflict_range(&self, range: Range) -> FdbResult<()> {
+        let (begin, end) = range.destructure();
+
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        internal::add_conflict_range(
+            (self.c_ptr.unwrap()).as_ptr(),
+            begin,
+            end,
+            ConflictRangeType::Write,
+        )
+    }
 
     fn cancel(&self) {
         unsafe {
@@ -251,8 +324,65 @@ impl Transaction for FdbTransaction {
         })
     }
 
+    fn get_approximate_size(&self) -> FdbFutureI64 {
+        FdbFuture::new(unsafe {
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_get_approximate_size((self.c_ptr.unwrap()).as_ptr())
+        })
+    }
+
+    fn get_committed_version(&self) -> FdbResult<i64> {
+        let mut out_version = 0;
+
+        check(unsafe {
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_get_committed_version(
+                (self.c_ptr.unwrap()).as_ptr(),
+                &mut out_version,
+            )
+        })
+        .map(|_| out_version)
+    }
+
     fn get_database(&self) -> FdbDatabase {
         self.fdb_database.clone()
+    }
+
+    fn get_versionstamp(&self) -> FdbFutureKey {
+        FdbFuture::new(unsafe {
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_get_versionstamp((self.c_ptr.unwrap()).as_ptr())
+        })
+    }
+
+    fn mutate(&self, optype: MutationType, key: Key, param: Bytes) {
+        let k = Bytes::from(key);
+        let key_name = k.as_ref().as_ptr();
+        let key_name_length = k.as_ref().len().try_into().unwrap();
+
+        let p = param;
+        let param = p.as_ref().as_ptr();
+        let param_length = p.as_ref().len().try_into().unwrap();
+
+        unsafe {
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_atomic_op(
+                (self.c_ptr.unwrap()).as_ptr(),
+                key_name,
+                key_name_length,
+                param,
+                param_length,
+                optype.code(),
+            );
+        }
     }
 
     fn on_error(&self, e: FdbError) -> FdbFutureUnit {
@@ -291,6 +421,23 @@ impl Transaction for FdbTransaction {
 
     fn snapshot(&self) -> &dyn ReadTransaction {
         self.get_read_snapshot()
+    }
+
+    fn watch(&self, key: Key) -> FdbFutureUnit {
+        let k = Bytes::from(key);
+        let key_name = k.as_ref().as_ptr();
+        let key_name_length = k.as_ref().len().try_into().unwrap();
+
+        FdbFuture::new(unsafe {
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_watch(
+                (self.c_ptr.unwrap()).as_ptr(),
+                key_name,
+                key_name_length,
+            )
+        })
     }
 }
 
@@ -381,6 +528,10 @@ impl ReadTransaction for ReadSnapshot {
         internal::read_transaction::get_read_version(self.c_ptr)
     }
 
+    fn is_snapshot(&self) -> bool {
+        true
+    }
+
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
         internal::read_transaction::set_option(self.c_ptr, option)
     }
@@ -392,39 +543,11 @@ impl ReadTransaction for ReadSnapshot {
 
 pub(super) mod internal {
     pub(super) mod read_transaction {
-        use crate::error::check;
         use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue};
-        use crate::option::ConflictRangeType;
         use crate::transaction::TransactionOption;
         use crate::{FdbResult, Key, KeySelector};
         use bytes::Bytes;
         use std::convert::TryInto;
-
-        pub(crate) fn add_conflict_range(
-            transaction: *mut fdb_sys::FDBTransaction,
-            begin_key: Key,
-            end_key: Key,
-            ty: ConflictRangeType,
-        ) -> FdbResult<()> {
-            let bk = Bytes::from(begin_key);
-            let begin_key_name = bk.as_ref().as_ptr();
-            let begin_key_name_length = bk.as_ref().len().try_into().unwrap();
-
-            let ek = Bytes::from(end_key);
-            let end_key_name = ek.as_ref().as_ptr();
-            let end_key_name_length = ek.as_ref().len().try_into().unwrap();
-
-            check(unsafe {
-                fdb_sys::fdb_transaction_add_conflict_range(
-                    transaction,
-                    begin_key_name,
-                    begin_key_name_length,
-                    end_key_name,
-                    end_key_name_length,
-                    ty.code(),
-                )
-            })
-        }
 
         pub(crate) fn get(
             transaction: *mut fdb_sys::FDBTransaction,
@@ -504,6 +627,38 @@ pub(super) mod internal {
         pub(crate) fn set_read_version(transaction: *mut fdb_sys::FDBTransaction, version: i64) {
             unsafe { fdb_sys::fdb_transaction_set_read_version(transaction, version) }
         }
+    }
+
+    use crate::error::check;
+    use crate::option::ConflictRangeType;
+    use crate::{FdbResult, Key};
+    use bytes::Bytes;
+    use std::convert::TryInto;
+
+    pub(crate) fn add_conflict_range(
+        transaction: *mut fdb_sys::FDBTransaction,
+        begin_key: Key,
+        end_key: Key,
+        ty: ConflictRangeType,
+    ) -> FdbResult<()> {
+        let bk = Bytes::from(begin_key);
+        let begin_key_name = bk.as_ref().as_ptr();
+        let begin_key_name_length = bk.as_ref().len().try_into().unwrap();
+
+        let ek = Bytes::from(end_key);
+        let end_key_name = ek.as_ref().as_ptr();
+        let end_key_name_length = ek.as_ref().len().try_into().unwrap();
+
+        check(unsafe {
+            fdb_sys::fdb_transaction_add_conflict_range(
+                transaction,
+                begin_key_name,
+                begin_key_name_length,
+                end_key_name,
+                end_key_name_length,
+                ty.code(),
+            )
+        })
     }
 }
 

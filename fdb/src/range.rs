@@ -1,15 +1,16 @@
 //! Provides types for working with FDB range.
 
 use bytes::Bytes;
+use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
 
 use crate::future::{FdbFuture, FdbFutureKeyValueArray};
-pub use crate::option::StreamingMode;
 use crate::transaction::ReadTransaction;
 use crate::{FdbError, FdbResult};
 use crate::{Key, KeySelector, KeyValue};
-use std::convert::TryInto;
+
+pub use crate::option::StreamingMode;
 
 /// [`Range`] describes an exact range of keyspace, specified by a
 /// begin and end key.
