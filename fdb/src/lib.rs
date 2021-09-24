@@ -28,6 +28,7 @@ pub mod database;
 pub mod future;
 pub mod range;
 pub mod transaction;
+pub mod tuple;
 
 pub use crate::error::{FdbError, FdbResult};
 

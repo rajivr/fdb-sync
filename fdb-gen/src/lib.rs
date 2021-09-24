@@ -59,18 +59,15 @@ impl FdbScope {
                 )?;
             }
             "MutationType" => {
-		writeln!(w, "/// A set of operations that can be performed atomically on a database.")?;
-                writeln!(w, "///")?;
                 writeln!(
                     w,
-                    "/// These options can be passed to [`mutate`] method."
+                    "/// A set of operations that can be performed atomically on a database."
                 )?;
                 writeln!(w, "///")?;
-                writeln!(
-                    w,
-                    "/// [`mutate`]: crate::transaction::Transaction::mutate"
-                )?;
-	    }
+                writeln!(w, "/// These options can be passed to [`mutate`] method.")?;
+                writeln!(w, "///")?;
+                writeln!(w, "/// [`mutate`]: crate::transaction::Transaction::mutate")?;
+            }
             "ConflictRangeType" => {
                 writeln!(
                     w,

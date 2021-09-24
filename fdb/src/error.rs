@@ -7,9 +7,11 @@
 ///
 /// [Error Codes]: https://apple.github.io/foundationdb/api-error-codes.html
 //
-// 100 - `open_database.rs`
-// 101 - `fdb_transaction.rs`
-// 102 - `fdb_transaction.rs`
+// 100 - `database/open_database.rs`
+// 101 - `transaction/fdb_transaction.rs`
+// 102 - `transaction/fdb_transaction.rs`
+//
+// 200 - `tuple/element.rs`
 #[derive(Copy, Clone, Debug)]
 pub struct FdbError {
     /// FoundationDB error code `fdb_error_t`
