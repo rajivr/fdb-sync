@@ -21,6 +21,7 @@ fdb-sys = { version = "0.1.0", path = "../fdb-sys", default-features = false }
 parking_lot = "0.11"
 uuid = { version = "0.8", features = ["v4"] }
 num-bigint = "0.4"
+num-traits = "0.2"
 nom = "7"
 
 [dev-dependencies]

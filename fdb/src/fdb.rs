@@ -1,8 +1,7 @@
 //! Starting point for accessing FoundationDB
 
-use crate::error::check;
+use crate::error::{check, FdbResult};
 use crate::option::NetworkOption;
-use crate::FdbResult;
 use bytes::Bytes;
 use parking_lot::{Once, OnceState};
 use std::thread::{self, JoinHandle};

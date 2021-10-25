@@ -20,17 +20,15 @@
 // like JoinHandle. In case of JoinHandle, we only lose the ability to
 // "join"
 
-mod error;
 mod fdb;
 mod option;
 
 pub mod database;
+pub mod error;
 pub mod future;
 pub mod range;
 pub mod transaction;
 pub mod tuple;
-
-pub use crate::error::{FdbError, FdbResult};
 
 pub use crate::fdb::{
     select_api_version, set_network_option, start_network, stop_network, Key, KeySelector,

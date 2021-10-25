@@ -1,6 +1,6 @@
 use crate::database::Database;
+use crate::error::FdbResult;
 use crate::transaction::{ReadTransactionContext, Transaction};
-use crate::FdbResult;
 
 /// The context in which [`Transaction`] is available for database
 /// operations.

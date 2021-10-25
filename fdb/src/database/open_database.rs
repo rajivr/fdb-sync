@@ -1,7 +1,5 @@
 use crate::database::FdbDatabase;
-use crate::error::check;
-use crate::FdbError;
-use crate::FdbResult;
+use crate::error::{check, FdbError, FdbResult, DATABASE_OPEN};
 use std::ffi::CString;
 use std::path::Path;
 use std::ptr::{self, NonNull};
@@ -23,9 +21,9 @@ where
         cluster_file_path
             .as_ref()
             .to_str()
-            .ok_or(FdbError::new(100))?,
+            .ok_or(FdbError::new(DATABASE_OPEN))?,
     )
-    .map_err(|_| FdbError::new(100))?;
+    .map_err(|_| FdbError::new(DATABASE_OPEN))?;
 
     // `path_ptr` is valid till we do `drop(path)`.
     let path_ptr = path.as_ptr();

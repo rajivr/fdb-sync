@@ -1,5 +1,5 @@
+use crate::error::FdbResult;
 use crate::transaction::ReadTransaction;
-use crate::FdbResult;
 
 /// A context in which [`ReadTransaction`] is available for database
 /// operations.

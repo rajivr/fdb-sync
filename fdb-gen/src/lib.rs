@@ -455,7 +455,7 @@ pub fn emit(w: &mut impl fmt::Write) -> fmt::Result {
     }
 
     writeln!(w, "use std::convert::TryFrom;")?;
-    writeln!(w, "use crate::{{FdbError, FdbResult}};")?;
+    writeln!(w, "use crate::error::{{FdbError, FdbResult}};")?;
     for scope in scopes.iter() {
         scope.gen_ty(w)?;
         scope.gen_impl(w)?;

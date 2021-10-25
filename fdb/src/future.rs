@@ -1,9 +1,9 @@
 //! Provides [`FdbFuture<T>`] type and [`FdbFutureGet`] trait for
 //! working with FDB Future.
 
-use crate::error::check;
+use crate::error::{check, FdbResult};
 use crate::range::KeyValueArray;
-use crate::{FdbResult, Key, KeyValue, Value};
+use crate::{Key, KeyValue, Value};
 use bytes::Bytes;
 use std::convert::TryInto;
 use std::marker::PhantomData;

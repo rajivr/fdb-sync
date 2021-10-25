@@ -1,8 +1,9 @@
 use crate::database::Database;
+use crate::error::{FdbError, FdbResult};
 use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureUnit};
 use crate::range::Range;
 use crate::transaction::{MutationType, ReadTransaction};
-use crate::{FdbError, FdbResult, Key, Value};
+use crate::{Key, Value};
 
 use bytes::Bytes;
 

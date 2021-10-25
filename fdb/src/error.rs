@@ -1,4 +1,5 @@
-//! Error types in fdb crate
+//! Provides [`FdbError`] type, [`FdbResult`] type alias and error
+//! constants.
 
 /// Error type for this crate.
 ///
@@ -7,16 +8,36 @@
 ///
 /// [Error Codes]: https://apple.github.io/foundationdb/api-error-codes.html
 //
-// 100 - `database/open_database.rs`
-// 101 - `transaction/fdb_transaction.rs`
-// 102 - `transaction/fdb_transaction.rs`
-//
-// 200 - `tuple/element.rs`
-#[derive(Copy, Clone, Debug)]
+// 100 - `database` module
+// 110 - `transaction` module
+// 120 - `tuple` module
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct FdbError {
     /// FoundationDB error code `fdb_error_t`
     error_code: i32,
 }
+
+/// Error occurred while opening database.
+pub const DATABASE_OPEN: i32 = 100;
+
+/// Error occured while trying to add read conflict key.
+pub const TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT: i32 = 110;
+
+/// Error occured while trying to add read conflict range.
+pub const TRANSACTION_ADD_READ_CONFLICT_RANGE_IF_NOT_SNAPSHOT: i32 = 111;
+
+// TODO: See if this can be removed?
+/// Error occurred while extracting tuple value.
+pub const TUPLE_EXTRACTOR: i32 = 120;
+
+/// Error occurred while getting a value from the tuple.
+pub const TUPLE_GET: i32 = 121;
+
+/// Error occurred extracting a [`Tuple`] value from [`Bytes`].
+///
+/// [`Tuple`]: crate::tuple::Tuple
+/// [`Bytes`]: bytes::Bytes
+pub const TUPLE_FROM_BYTES: i32 = 122;
 
 /// Alias for [`Result`]`<T,`[`FdbError`]`>`
 ///

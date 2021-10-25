@@ -5,9 +5,9 @@ use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
 
+use crate::error::{FdbError, FdbResult};
 use crate::future::{FdbFuture, FdbFutureKeyValueArray};
 use crate::transaction::ReadTransaction;
-use crate::{FdbError, FdbResult};
 use crate::{Key, KeySelector, KeyValue};
 
 pub use crate::option::StreamingMode;

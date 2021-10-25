@@ -1,6 +1,18 @@
 use bytes::{Buf, BufMut};
 use bytes::{Bytes, BytesMut};
 
+// As mentioned here [1], depending on the context, there are two
+// concepts of versionstamp.
+//
+// At the `fdb_c` client level, the "versionstamp" is 10 bytes,
+// consisting of the transaction's commit version (8 bytes) and
+// transaction batch order (2 bytes).
+//
+// In the context of the Tuple layer, the "versionstamp" is 12
+// bytes. The user can manually add 2 additional bytes to provide
+// application level ordering.
+//
+// [1]: https://apple.github.io/foundationdb/data-modeling.html#versionstamps
 const VERSIONSTAMP_TR_VERSION_LEN: usize = 10;
 const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 

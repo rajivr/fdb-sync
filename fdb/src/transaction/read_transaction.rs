@@ -1,7 +1,8 @@
+use crate::error::FdbResult;
 use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue};
 use crate::range::{Range, RangeOptions, RangeResult};
 use crate::transaction::TransactionOption;
-use crate::{FdbResult, Key, KeySelector};
+use crate::{Key, KeySelector};
 
 /// A read-only subset of a FDB [`Transaction`].
 ///

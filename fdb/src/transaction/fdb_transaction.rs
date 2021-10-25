@@ -1,5 +1,8 @@
 use crate::database::FdbDatabase;
-use crate::error::check;
+use crate::error::{
+    check, FdbError, FdbResult, TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT,
+    TRANSACTION_ADD_READ_CONFLICT_RANGE_IF_NOT_SNAPSHOT,
+};
 use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
 use crate::option::ConflictRangeType;
 use crate::range::{fdb_transaction_get_range, Range, RangeOptions, RangeResult};
@@ -7,7 +10,7 @@ use crate::transaction::{
     MutationType, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
     TransactionOption,
 };
-use crate::{FdbError, FdbResult, Key, KeySelector, Value};
+use crate::{Key, KeySelector, Value};
 
 use bytes::Bytes;
 use std::convert::TryInto;
@@ -474,12 +477,16 @@ struct ReadSnapshot {
 impl ReadTransaction for ReadSnapshot {
     fn add_read_conflict_key_if_not_snapshot(&self, _key: Key) -> FdbResult<()> {
         // return error, as this is a snapshot
-        Err(FdbError::new(101))
+        Err(FdbError::new(
+            TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT,
+        ))
     }
 
     fn add_read_conflict_range_if_not_snapshot(&self, _range: Range) -> FdbResult<()> {
         // return error, as this is a snapshot
-        Err(FdbError::new(102))
+        Err(FdbError::new(
+            TRANSACTION_ADD_READ_CONFLICT_RANGE_IF_NOT_SNAPSHOT,
+        ))
     }
 
     fn get(&self, key: Key) -> FdbFutureMaybeValue {
@@ -543,9 +550,10 @@ impl ReadTransaction for ReadSnapshot {
 
 pub(super) mod internal {
     pub(super) mod read_transaction {
+        use crate::error::FdbResult;
         use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue};
         use crate::transaction::TransactionOption;
-        use crate::{FdbResult, Key, KeySelector};
+        use crate::{Key, KeySelector};
         use bytes::Bytes;
         use std::convert::TryInto;
 
@@ -629,9 +637,9 @@ pub(super) mod internal {
         }
     }
 
-    use crate::error::check;
+    use crate::error::{check, FdbResult};
     use crate::option::ConflictRangeType;
-    use crate::{FdbResult, Key};
+    use crate::Key;
     use bytes::Bytes;
     use std::convert::TryInto;
 

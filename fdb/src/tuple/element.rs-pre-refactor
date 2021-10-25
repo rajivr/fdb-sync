@@ -1,0 +1,382 @@
+use bytes::Bytes;
+use num_bigint::BigInt;
+use uuid::Uuid;
+
+use crate::tuple::Versionstamp;
+
+// The specifications for FDB Tuple layer typecodes is here.
+// https://github.com/apple/foundationdb/blob/master/design/tuple.md
+
+// todo: https://github.com/josephg/fdb-tuple/blob/master/lib/test.ts
+// todo: https://github.com/apache/couchdb-erlfdb/blob/main/src/erlfdb_tuple.erl
+
+#[derive(Clone, PartialEq, Debug)]
+enum TupleValue {
+    NullValue,                                 // 0x00
+    ByteString(Bytes),                         // 0x01
+    UnicodeString(String),                     // 0x02
+    NestedTuple(Vec<TupleValue>),              // 0x05
+    NegativeArbitraryPrecisionInteger(BigInt), // 0x0b
+    NegInt8(u64),                              // 0x0c
+    NegInt7(u64),                              // 0x0d
+    NegInt6(u64),                              // 0x0e
+    NegInt5(u64),                              // 0x0f
+    NegInt4(u32),                              // 0x10
+    NegInt3(u32),                              // 0x11
+    NegInt2(u16),                              // 0x12
+    NegInt1(u8),                               // 0x13
+    IntZero,                                   // 0x14
+    PosInt1(u8),                               // 0x15
+    PosInt2(u16),                              // 0x16
+    PosInt3(u32),                              // 0x17
+    PosInt4(u32),                              // 0x18
+    PosInt5(u64),                              // 0x19
+    PosInt6(u64),                              // 0x1a
+    PosInt7(u64),                              // 0x1b
+    PosInt8(u64),                              // 0x1c
+    PositiveArbitraryPrecisionInteger(BigInt), // 0x1d
+    IeeeBinaryFloatingPointFloat(f32),         // 0x20
+    IeeeBinaryFloatingPointDouble(f64),        // 0x21
+    FalseValue,                                // 0x26
+    TrueValue,                                 // 0x27
+    Rfc4122Uuid(Uuid),                         // 0x30
+    Versionstamp96Bit(Versionstamp),           // 0x33
+}
+
+pub(self) mod parsers {
+    use super::TupleValue;
+
+    // TODO: Remove this, if it no longer needed.
+    use bytes::Buf;
+    use nom::{bytes as nom_bytes, combinator, number, sequence, IResult};
+
+    fn neg_u8_slice_into_vec(i: &[u8]) -> Vec<u8> {
+        let mut res = Vec::new();
+        i.into_iter().for_each(|x| {
+            res.push(!(*x));
+        });
+        res
+    }
+
+    fn neg_int_4(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x10"[..]),
+            combinator::map(nom_bytes::complete::take(4u8), |x: &[u8]| {
+                (Into::<i64>::into((&neg_u8_slice_into_vec(x)[..]).get_u32())) * -1
+            }),
+        )(i)
+    }
+
+    fn neg_int_3(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x11"[..]),
+            combinator::map(nom_bytes::complete::take(3u8), |x: &[u8]| {
+                let mut val = vec![0xffu8];
+                val.extend_from_slice(x);
+                (Into::<i64>::into((&neg_u8_slice_into_vec(&val[..])[..]).get_u32())) * -1
+            }),
+        )(i)
+    }
+
+    fn neg_int_2(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x12"[..]),
+            combinator::map(nom_bytes::complete::take(2u8), |x: &[u8]| {
+                (Into::<i64>::into((&neg_u8_slice_into_vec(x)[..]).get_u16())) * -1
+            }),
+        )(i)
+    }
+
+    // fn neg_int_2(i: &[u8]) -> IResult<&[u8], i64> {
+    //     sequence::preceded(
+    //         nom_bytes::complete::tag(&b"\x12"[..]),
+    //         combinator::map_opt(nom_bytes::complete::take(2u8), |x: &[u8]| {
+    // 		println!("debug: {:?}", x);
+    //             match number::complete::be_i16::<&[u8], ()>(&neg_u8_slice_into_vec(x)[..]) {
+    //                 Ok((_, res)) => Some((res.into() as i16 + 1).into()),
+    //                 Err(_) => None,
+    //             }
+    //         }),
+    //     )(i)
+    // }
+
+    fn neg_int_1(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x13"[..]),
+            combinator::map(nom_bytes::complete::take(1u8), |x: &[u8]| {
+                (Into::<i64>::into((&neg_u8_slice_into_vec(x)[..]).get_u8())) * -1
+            }),
+        )(i)
+    }
+
+    fn int_zero(i: &[u8]) -> IResult<&[u8], TupleValue> {
+        combinator::map(nom_bytes::complete::tag(&b"\x14"[..]), |_| {
+            TupleValue::IntZero
+        })(i)
+    }
+
+    fn zero(i: &[u8]) -> IResult<&[u8], i64> {
+        combinator::map(nom_bytes::complete::tag(&b"\x14"[..]), |_| 0)(i)
+    }
+
+    fn pos_int_1(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x15"[..]),
+            combinator::map(nom_bytes::complete::take(1u8), |mut x: &[u8]| {
+                (x.get_u8()).into()
+            }),
+        )(i)
+    }
+
+    fn pos_int_2(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x16"[..]),
+            combinator::map(nom_bytes::complete::take(2u8), |mut x: &[u8]| {
+                (x.get_u16()).into()
+            }),
+        )(i)
+    }
+
+    fn pos_int_3(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x17"[..]),
+            combinator::map(nom_bytes::complete::take(3u8), |x: &[u8]| {
+                let mut val = vec![0u8];
+                val.extend_from_slice(x);
+                (&val[..]).get_u32().into()
+            }),
+        )(i)
+    }
+
+    fn pos_int_4(i: &[u8]) -> IResult<&[u8], i64> {
+        sequence::preceded(
+            nom_bytes::complete::tag(&b"\x18"[..]),
+            combinator::map(nom_bytes::complete::take(4u8), |mut x: &[u8]| {
+                (x.get_u32()).into()
+            }),
+        )(i)
+    }
+
+    // fn pos_int_5(i: &[u8]) -> IResult<&[u8], i64> {
+    //     sequence::preceded(
+    //         nom_bytes::complete::tag(&b"\x19"[..]),
+    //         combinator::map(nom_bytes::complete::take(5u8), |x: &[u8]| {
+    //             let mut val = vec![0u8, 0u8, 0u8];
+    //             val.extend_from_slice(x);
+    //             (&val[..]).get_u64().try_into()
+    //         }),
+    //     )(i)
+    // }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            int_zero, neg_int_1, neg_int_2, neg_int_3, neg_int_4, pos_int_1, pos_int_2, pos_int_3,
+            pos_int_4, zero, TupleValue,
+        };
+        use nom::error::{Error, ErrorKind};
+
+        #[test]
+        fn test_neg_int_4() {
+            assert_eq!(
+                neg_int_4(&b"\x10\x00\x00\x00\x00moredata"[..]),
+                Ok((&b"moredata"[..], -4294967295))
+            );
+            assert_eq!(
+                neg_int_4(&b"\x10\xFE\xFF\xFF\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], -16777216))
+            );
+            assert_eq!(
+                neg_int_4(&b"no_neg_int_4"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_neg_int_4"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_neg_int_3() {
+            assert_eq!(
+                neg_int_3(&b"\x11\x00\x00\x00moredata"[..]),
+                Ok((&b"moredata"[..], -16777215))
+            );
+            assert_eq!(
+                neg_int_3(&b"\x11\xFE\xFF\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], -65536))
+            );
+            assert_eq!(
+                neg_int_3(&b"no_neg_int_3"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_neg_int_3"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_neg_int_2() {
+            assert_eq!(
+                neg_int_2(&b"\x12\x00\x00moredata"[..]),
+                Ok((&b"moredata"[..], -65535))
+            );
+
+            assert_eq!(
+                neg_int_2(&b"\x12\xFE\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], -256))
+            );
+            assert_eq!(
+                neg_int_2(&b"no_neg_int_2"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_neg_int_2"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_neg_int_1() {
+            assert_eq!(
+                neg_int_1(&b"\x13\x00moredata"[..]),
+                Ok((&b"moredata"[..], -255))
+            );
+            assert_eq!(
+                neg_int_1(&b"\x13\xFEmoredata"[..]),
+                Ok((&b"moredata"[..], -1))
+            );
+            assert_eq!(
+                neg_int_1(&b"no_neg_int_1"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_neg_int_1"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_int_zero() {
+            println!("{:?}", int_zero(&b"\x14moredata"[..]));
+            assert_eq!(
+                int_zero(&b"\x14moredata"[..]),
+                Ok((&b"moredata"[..], TupleValue::IntZero))
+            );
+        }
+
+        #[test]
+        fn test_zero() {
+            assert_eq!(zero(&b"\x14moredata"[..]), Ok((&b"moredata"[..], 0)));
+            assert_eq!(
+                zero(&b"no_zero"[..]),
+                Err(nom::Err::Error(Error::new(&b"no_zero"[..], ErrorKind::Tag)))
+            );
+        }
+
+        #[test]
+        fn test_pos_int_1() {
+            assert_eq!(
+                pos_int_1(&b"\x15\x01moredata"[..]),
+                Ok((&b"moredata"[..], 1))
+            );
+            assert_eq!(
+                pos_int_1(&b"\x15\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], 255))
+            );
+            assert_eq!(
+                pos_int_1(&b"no_pos_int_1"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_pos_int_1"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_pos_int_2() {
+            assert_eq!(
+                pos_int_2(&b"\x16\x01\x00moredata"[..]),
+                Ok((&b"moredata"[..], 256))
+            );
+            assert_eq!(
+                pos_int_2(&b"\x16\xFF\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], 65535))
+            );
+            assert_eq!(
+                pos_int_2(&b"no_pos_int_2"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_pos_int_2"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_pos_int_3() {
+            assert_eq!(
+                pos_int_3(&b"\x17\x01\x00\x00moredata"[..]),
+                Ok((&b"moredata"[..], 65536))
+            );
+            assert_eq!(
+                pos_int_3(&b"\x17\xFF\xFF\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], 16777215))
+            );
+            assert_eq!(
+                pos_int_3(&b"no_pos_int_3"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_pos_int_3"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        #[test]
+        fn test_pos_int_4() {
+            assert_eq!(
+                pos_int_4(&b"\x18\x01\x00\x00\x00moredata"[..]),
+                Ok((&b"moredata"[..], 16777216))
+            );
+            assert_eq!(
+                pos_int_4(&b"\x18\xFF\xFF\xFF\xFFmoredata"[..]),
+                Ok((&b"moredata"[..], 4294967295))
+            );
+            assert_eq!(
+                pos_int_4(&b"no_pos_int_4"[..]),
+                Err(nom::Err::Error(Error::new(
+                    &b"no_pos_int_4"[..],
+                    ErrorKind::Tag
+                )))
+            );
+        }
+
+        // #[test]
+        // fn test_size_limits_pos() {
+        //     let size_limits_pos: Vec<i128> = vec![
+        //         (1 << (0 * 8)) - 1,
+        //         (1 << (1 * 8)) - 1,
+        //         (1 << (2 * 8)) - 1,
+        //         (1 << (3 * 8)) - 1,
+        //         (1 << (4 * 8)) - 1,
+        //         (1 << (5 * 8)) - 1,
+        //         (1 << (6 * 8)) - 1,
+        //         (1 << (7 * 8)) - 1,
+        //         (1 << (8 * 8)) - 1,
+        //     ];
+        //     println!("size_limits_pos: {:?}", size_limits_pos);
+        // }
+
+        // #[test]
+        // fn test_size_limits_neg() {
+        //     let size_limits_neg: Vec<i128> = vec![
+        //         ((1 << (0 * 8)) * -1) + 1,
+        //         ((1 << (1 * 8)) * -1) + 1,
+        //         ((1 << (2 * 8)) * -1) + 1,
+        //         ((1 << (3 * 8)) * -1) + 1,
+        //         ((1 << (4 * 8)) * -1) + 1,
+        //         ((1 << (5 * 8)) * -1) + 1,
+        //         ((1 << (6 * 8)) * -1) + 1,
+        //         ((1 << (7 * 8)) * -1) + 1,
+        //         ((1 << (8 * 8)) * -1) + 1,
+        //     ];
+        //     println!("size_limits_neg: {:?}", size_limits_neg);
+        // }
+    }
+}

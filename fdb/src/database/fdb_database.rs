@@ -1,9 +1,8 @@
 use crate::database::{Database, DatabaseOption};
-use crate::error::check;
+use crate::error::{check, FdbResult};
 use crate::transaction::{
     FdbTransaction, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
 };
-use crate::FdbResult;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 

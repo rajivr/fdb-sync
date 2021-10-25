@@ -1,6 +1,6 @@
 use crate::database::DatabaseOption;
+use crate::error::FdbResult;
 use crate::transaction::{Transaction, TransactionContext};
-use crate::FdbResult;
 
 /// A mutable, lexicographically ordered mapping from binary keys to
 /// binary values.
