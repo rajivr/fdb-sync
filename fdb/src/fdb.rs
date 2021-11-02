@@ -1,16 +1,17 @@
 //! Starting point for accessing FoundationDB
+use bytes::Bytes;
+use parking_lot::{Once, OnceState};
+
+use std::thread::{self, JoinHandle};
 
 use crate::error::{check, FdbResult};
 use crate::option::NetworkOption;
-use bytes::Bytes;
-use parking_lot::{Once, OnceState};
-use std::thread::{self, JoinHandle};
 
 /// [`Key`] represents a FDB key, a lexicographically-ordered sequence
 /// of bytes.
 ///
 /// [`Key`] can be converted from and into [`Bytes`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Key(Bytes);
 
 impl From<Bytes> for Key {
@@ -29,7 +30,7 @@ impl From<Key> for Bytes {
 /// of bytes.
 ///
 /// [`Value`] can be converted from and into [`Bytes`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Value(Bytes);
 
 impl From<Bytes> for Value {

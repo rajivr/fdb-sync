@@ -1,30 +1,32 @@
-//! Provides [`FdbFuture<T>`] type and [`FdbFutureGet`] trait for
+//! Provides [`FdbFuture`] type and [`FdbFutureGet`] trait for
 //! working with FDB Future.
 
-use crate::error::{check, FdbResult};
-use crate::range::KeyValueArray;
-use crate::{Key, KeyValue, Value};
 use bytes::Bytes;
+
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::slice;
 
-/// A `FdbFuture<T>` represents a value (or error) to be available at
+use crate::error::{check, FdbResult};
+use crate::range::KeyValueArray;
+use crate::{Key, KeyValue, Value};
+
+/// A [`FdbFuture`] represents a value (or error) to be available at
 /// some other time.
 ///
-/// Asynchronous FDB APIs return an `FdbFuture<T>`.
+/// Asynchronous FDB APIs return an [`FdbFuture`].
 #[derive(Debug)]
-pub struct FdbFuture<T> {
+pub struct FdbFuture<'t, T> {
     c_ptr: Option<NonNull<fdb_sys::FDBFuture>>,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<&'t T>,
 }
 
-impl<T> FdbFuture<T>
+impl<'t, T> FdbFuture<'t, T>
 where
     T: FdbFutureGet,
 {
-    pub(crate) fn new(fdb_future: *mut fdb_sys::FDBFuture) -> FdbFuture<T> {
+    pub(crate) fn new(fdb_future: *mut fdb_sys::FDBFuture) -> FdbFuture<'t, T> {
         FdbFuture {
             c_ptr: Some(
                 NonNull::new(fdb_future)
@@ -38,7 +40,7 @@ where
     /// future becomes ready either when it receives a value of type
     /// `T`, or when an error occurs.
     //
-    // NOTE: `join` takes ownership of `FdbFuture<T>`. This is an
+    // NOTE: `join` takes ownership of `FdbFuture`. This is an
     //       important aspect of the API design, as we rely on
     //       `Drop::drop` in order to call
     //       `fdb_sys::fdb_future_destroy`.
@@ -52,7 +54,7 @@ where
     }
 }
 
-impl<T> Drop for FdbFuture<T> {
+impl<'t, T> Drop for FdbFuture<'t, T> {
     fn drop(&mut self) {
         self.c_ptr.take().map(|ptr| unsafe {
             fdb_sys::fdb_future_destroy(ptr.as_ptr());
@@ -60,12 +62,12 @@ impl<T> Drop for FdbFuture<T> {
     }
 }
 
-/// Extracts value that are owned by [`FdbFuture<T>`]
+/// Extracts value that are owned by [`FdbFuture`]
 ///
 /// In most cases you will not directly use this trait. It is used by
-/// [`FdbFuture<T>::join`] method.
+/// [`FdbFuture::join`] method.
 pub trait FdbFutureGet {
-    /// Extract value that are owned by [`FdbFuture<T>`]
+    /// Extract value that are owned by [`FdbFuture`]
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<Self>
     where
         Self: Sized;
@@ -73,7 +75,7 @@ pub trait FdbFutureGet {
 
 /// Represents the asynchronous result of a function that has no
 /// return value.
-pub type FdbFutureUnit = FdbFuture<()>;
+pub type FdbFutureUnit<'t> = FdbFuture<'t, ()>;
 
 impl FdbFutureGet for () {
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<()> {
@@ -83,7 +85,7 @@ impl FdbFutureGet for () {
 
 /// Represents the asynchronous result of a function that returns a
 /// database version.
-pub type FdbFutureI64 = FdbFuture<i64>;
+pub type FdbFutureI64<'t> = FdbFuture<'t, i64>;
 
 impl FdbFutureGet for i64 {
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<i64> {
@@ -94,7 +96,7 @@ impl FdbFutureGet for i64 {
 
 /// Represents the asynchronous result of a function that returns a
 /// [`Key`] from a database.
-pub type FdbFutureKey = FdbFuture<Key>;
+pub type FdbFutureKey<'t> = FdbFuture<'t, Key>;
 
 impl FdbFutureGet for Key {
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<Key> {
@@ -119,7 +121,7 @@ impl FdbFutureGet for Key {
 
 /// Represents the asynchronous result of a function that *maybe* returns a
 /// key [`Value`] from a database.
-pub type FdbFutureMaybeValue = FdbFuture<Option<Value>>;
+pub type FdbFutureMaybeValue<'t> = FdbFuture<'t, Option<Value>>;
 
 impl FdbFutureGet for Option<Value> {
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<Option<Value>> {
@@ -150,7 +152,7 @@ impl FdbFutureGet for Option<Value> {
     }
 }
 
-pub(crate) type FdbFutureKeyValueArray = FdbFuture<KeyValueArray>;
+pub(crate) type FdbFutureKeyValueArray<'t> = FdbFuture<'t, KeyValueArray>;
 
 impl FdbFutureGet for KeyValueArray {
     unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<KeyValueArray> {
@@ -192,16 +194,17 @@ impl FdbFutureGet for KeyValueArray {
 
 #[cfg(test)]
 mod tests {
+    use impls::impls;
+
     use super::{
         FdbFutureI64, FdbFutureKey, FdbFutureKeyValueArray, FdbFutureMaybeValue, FdbFutureUnit,
     };
-    use impls::impls;
 
     #[test]
     fn impls() {
         #[rustfmt::skip]
 	assert!(impls!(
-	    FdbFutureUnit:
+	    FdbFutureUnit<'_>:
 	        !Copy &
 		!Clone &
 		!Send &
@@ -209,7 +212,7 @@ mod tests {
 
         #[rustfmt::skip]
 	assert!(impls!(
-	    FdbFutureI64:
+	    FdbFutureI64<'_>:
 	        !Copy &
 		!Clone &
 		!Send &
@@ -217,7 +220,7 @@ mod tests {
 
         #[rustfmt::skip]
 	assert!(impls!(
-	    FdbFutureKey:
+	    FdbFutureKey<'_>:
 	        !Copy &
 		!Clone &
 		!Send &
@@ -225,7 +228,7 @@ mod tests {
 
         #[rustfmt::skip]
 	assert!(impls!(
-	    FdbFutureMaybeValue:
+	    FdbFutureMaybeValue<'_>:
 	        !Copy &
 		!Clone &
 		!Send &
@@ -233,7 +236,7 @@ mod tests {
 
         #[rustfmt::skip]
 	assert!(impls!(
-	    FdbFutureKeyValueArray:
+	    FdbFutureKeyValueArray<'_>:
 	        !Copy &
 		!Clone &
 		!Send &

@@ -1,3 +1,9 @@
+use bytes::Bytes;
+
+use std::convert::TryInto;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+
 use crate::database::FdbDatabase;
 use crate::error::{
     check, FdbError, FdbResult, TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT,
@@ -11,11 +17,6 @@ use crate::transaction::{
     TransactionOption,
 };
 use crate::{Key, KeySelector, Value};
-
-use bytes::Bytes;
-use std::convert::TryInto;
-use std::marker::PhantomData;
-use std::ptr::NonNull;
 
 /// A handle to a FDB transaction.
 ///
@@ -102,14 +103,14 @@ impl ReadTransaction for FdbTransaction {
         )
     }
 
-    fn get(&self, key: Key) -> FdbFutureMaybeValue {
+    fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t> {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
         internal::read_transaction::get((self.c_ptr.unwrap()).as_ptr(), key, false)
     }
 
-    fn get_estimated_range_size_bytes(&self, range: Range) -> FdbFutureI64 {
+    fn get_estimated_range_size_bytes<'t>(&'t self, range: Range) -> FdbFutureI64<'t> {
         let (begin, end) = range.destructure();
 
         // Safety: It is safe to unwrap here because if we have a
@@ -122,7 +123,7 @@ impl ReadTransaction for FdbTransaction {
         )
     }
 
-    fn get_key(&self, selector: KeySelector) -> FdbFutureKey {
+    fn get_key<'t>(&'t self, selector: KeySelector) -> FdbFutureKey<'t> {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -160,7 +161,7 @@ impl ReadTransaction for FdbTransaction {
         )
     }
 
-    fn get_read_version(&self) -> FdbFutureI64 {
+    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -318,7 +319,7 @@ impl Transaction for FdbTransaction {
         }
     }
 
-    fn commit(&self) -> FdbFutureUnit {
+    fn commit<'t>(&'t self) -> FdbFutureUnit<'t> {
         FdbFuture::new(unsafe {
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -327,7 +328,7 @@ impl Transaction for FdbTransaction {
         })
     }
 
-    fn get_approximate_size(&self) -> FdbFutureI64 {
+    fn get_approximate_size<'t>(&'t self) -> FdbFutureI64<'t> {
         FdbFuture::new(unsafe {
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -355,7 +356,7 @@ impl Transaction for FdbTransaction {
         self.fdb_database.clone()
     }
 
-    fn get_versionstamp(&self) -> FdbFutureKey {
+    fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t> {
         FdbFuture::new(unsafe {
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -388,7 +389,7 @@ impl Transaction for FdbTransaction {
         }
     }
 
-    fn on_error(&self, e: FdbError) -> FdbFutureUnit {
+    fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
         FdbFuture::new(unsafe {
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -426,7 +427,7 @@ impl Transaction for FdbTransaction {
         self.get_read_snapshot()
     }
 
-    fn watch(&self, key: Key) -> FdbFutureUnit {
+    fn watch<'t>(&'t self, key: Key) -> FdbFutureUnit<'t> {
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -489,17 +490,17 @@ impl ReadTransaction for ReadSnapshot {
         ))
     }
 
-    fn get(&self, key: Key) -> FdbFutureMaybeValue {
+    fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t> {
         internal::read_transaction::get(self.c_ptr, key, true)
     }
 
-    fn get_estimated_range_size_bytes(&self, range: Range) -> FdbFutureI64 {
+    fn get_estimated_range_size_bytes<'t>(&'t self, range: Range) -> FdbFutureI64<'t> {
         let (begin, end) = range.destructure();
 
         internal::read_transaction::get_estimated_range_size_bytes(self.c_ptr, begin, end)
     }
 
-    fn get_key(&self, selector: KeySelector) -> FdbFutureKey {
+    fn get_key<'t>(&'t self, selector: KeySelector) -> FdbFutureKey<'t> {
         internal::read_transaction::get_key(self.c_ptr, selector, true)
     }
 
@@ -531,7 +532,7 @@ impl ReadTransaction for ReadSnapshot {
         )
     }
 
-    fn get_read_version(&self) -> FdbFutureI64 {
+    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
         internal::read_transaction::get_read_version(self.c_ptr)
     }
 
@@ -557,11 +558,11 @@ pub(super) mod internal {
         use bytes::Bytes;
         use std::convert::TryInto;
 
-        pub(crate) fn get(
+        pub(crate) fn get<'t>(
             transaction: *mut fdb_sys::FDBTransaction,
             key: Key,
             snapshot: bool,
-        ) -> FdbFutureMaybeValue {
+        ) -> FdbFutureMaybeValue<'t> {
             let k = Bytes::from(key);
             let key_name = k.as_ref().as_ptr();
             let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -572,11 +573,11 @@ pub(super) mod internal {
             })
         }
 
-        pub(crate) fn get_estimated_range_size_bytes(
+        pub(crate) fn get_estimated_range_size_bytes<'t>(
             transaction: *mut fdb_sys::FDBTransaction,
             begin_key: Key,
             end_key: Key,
-        ) -> FdbFutureI64 {
+        ) -> FdbFutureI64<'t> {
             let bk = Bytes::from(begin_key);
             let begin_key_name = bk.as_ref().as_ptr();
             let begin_key_name_length = bk.as_ref().len().try_into().unwrap();
@@ -596,11 +597,11 @@ pub(super) mod internal {
             })
         }
 
-        pub(crate) fn get_key(
+        pub(crate) fn get_key<'t>(
             transaction: *mut fdb_sys::FDBTransaction,
             selector: KeySelector,
             snapshot: bool,
-        ) -> FdbFutureKey {
+        ) -> FdbFutureKey<'t> {
             let k = Bytes::from(selector.get_key().clone());
             let key_name = k.as_ref().as_ptr();
             let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -621,7 +622,9 @@ pub(super) mod internal {
             })
         }
 
-        pub(crate) fn get_read_version(transaction: *mut fdb_sys::FDBTransaction) -> FdbFutureI64 {
+        pub(crate) fn get_read_version<'t>(
+            transaction: *mut fdb_sys::FDBTransaction,
+        ) -> FdbFutureI64<'t> {
             FdbFuture::new(unsafe { fdb_sys::fdb_transaction_get_read_version(transaction) })
         }
 
@@ -672,11 +675,13 @@ pub(super) mod internal {
 
 #[cfg(test)]
 mod tests {
-    use super::{FdbTransaction, ReadSnapshot};
+    use impls::impls;
+
     use crate::transaction::{
         ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
     };
-    use impls::impls;
+
+    use super::{FdbTransaction, ReadSnapshot};
 
     #[test]
     fn impls() {

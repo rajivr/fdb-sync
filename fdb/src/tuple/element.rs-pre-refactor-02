@@ -1836,6 +1836,376 @@ pub(self) mod parser {
         )(i)
     }
 
+    pub(self) mod tuple_extractor {
+        use super::TupleValue;
+        use crate::error::{FdbError, FdbResult, TUPLE_EXTRACTOR};
+        use crate::tuple::{Tuple, Versionstamp};
+        use bytes::Bytes;
+        use num_bigint::BigInt;
+        use std::convert::TryInto;
+        use uuid::Uuid;
+
+        fn tuple_extractor_error() -> FdbError {
+            FdbError::new(TUPLE_EXTRACTOR)
+        }
+
+        pub(crate) fn null_value(tv: TupleValue) -> FdbResult<()> {
+            if let TupleValue::NullValue = tv {
+                Ok(())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn nested_tuple_null_value(tv: TupleValue) -> FdbResult<()> {
+            if let TupleValue::NullValue = tv {
+                Ok(())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn byte_string(tv: TupleValue) -> FdbResult<Bytes> {
+            if let TupleValue::ByteString(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn unicode_string(tv: TupleValue) -> FdbResult<String> {
+            if let TupleValue::UnicodeString(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn nested_tuple(tv: TupleValue) -> FdbResult<Tuple> {
+            if let TupleValue::NestedTuple(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn negative_arbitrary_precision_integer(tv: TupleValue) -> FdbResult<BigInt> {
+            if let TupleValue::NegativeArbitraryPrecisionInteger(i) = tv {
+                Ok(i * -1)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_8_bigint(tv: TupleValue) -> FdbResult<BigInt> {
+            if let TupleValue::NegInt8(i) = tv {
+                Ok(Into::<BigInt>::into(i) * -1)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_8_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::NegInt8(i) = tv {
+                (Into::<i128>::into(i) * -1)
+                    .try_into()
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_7_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::NegInt7(i) = tv {
+                // Even though NegInt5's range
+                // -72057594037927935..=-281474976710656 is well
+                // within i64::MIN (-9223372036854775808), this
+                // information is not known to `i: u64`. So we need to
+                // use `try_into()`.
+                i.try_into()
+                    .map(|x: i64| x * -1)
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_6_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::NegInt6(i) = tv {
+                // Even though NegInt5's range
+                // -281474976710655..=-1099511627776 is well within
+                // i64::MIN (-9223372036854775808), this information
+                // is not known to `i: u64`. So we need to use
+                // `try_into()`.
+                i.try_into()
+                    .map(|x: i64| x * -1)
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_5_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::NegInt5(i) = tv {
+                // Even though NegInt5's range
+                // -1099511627775..=-4294967296 is well within
+                // i64::MIN (-9223372036854775808), this information
+                // is not known to `i: u64`. So we need to use
+                // `try_into()`.
+                i.try_into()
+                    .map(|x: i64| x * -1)
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_4_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::NegInt4(i) = tv {
+                Ok(Into::<i64>::into(i) * -1)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_4_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::NegInt4(i) = tv {
+                (Into::<i64>::into(i) * -1)
+                    .try_into()
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_3_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::NegInt3(i) = tv {
+                // Even though NegInt3's range -16777215..=-65536 is
+                // well within i32::MIN (-2147483648), this
+                // information is not known to `i: u32`. So, we need
+                // to use `try_into()`.
+                i.try_into()
+                    .map(|x: i32| x * -1)
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_2_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::NegInt2(i) = tv {
+                Ok(Into::<i32>::into(i) * -1)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_2_i16(tv: TupleValue) -> FdbResult<i16> {
+            if let TupleValue::NegInt2(i) = tv {
+                (Into::<i32>::into(i) * -1)
+                    .try_into()
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_1_i16(tv: TupleValue) -> FdbResult<i16> {
+            if let TupleValue::NegInt1(i) = tv {
+                Ok(Into::<i16>::into(i) * -1)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn neg_int_1_i8(tv: TupleValue) -> FdbResult<i8> {
+            if let TupleValue::NegInt1(i) = tv {
+                (Into::<i16>::into(i) * -1)
+                    .try_into()
+                    .map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn int_zero(tv: TupleValue) -> FdbResult<i8> {
+            if let TupleValue::IntZero = tv {
+                Ok(0)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_1_i8(tv: TupleValue) -> FdbResult<i8> {
+            if let TupleValue::PosInt1(i) = tv {
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_1_i16(tv: TupleValue) -> FdbResult<i16> {
+            if let TupleValue::PosInt1(i) = tv {
+                Ok(i.into())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_2_i16(tv: TupleValue) -> FdbResult<i16> {
+            if let TupleValue::PosInt2(i) = tv {
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_2_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::PosInt2(i) = tv {
+                Ok(i.into())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_3_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::PosInt3(i) = tv {
+                // Even though PosInt3's range 65536..=16777215 is
+                // within i32::MAX (2147483647), this information is
+                // not known to `i: u32`. So we need to use
+                // `try_into()`.
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_4_i32(tv: TupleValue) -> FdbResult<i32> {
+            if let TupleValue::PosInt4(i) = tv {
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_4_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::PosInt4(i) = tv {
+                Ok(i.into())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_5_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::PosInt5(i) = tv {
+                // Even though PosInt5's range
+                // 4294967296..=1099511627775 is within i64::MAX
+                // (9223372036854775807), this information is not
+                // known to `i: u64`. So we need to use `try_into()`.
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_6_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::PosInt6(i) = tv {
+                // Even though PosInt6's range
+                // 1099511627776..=281474976710655 is within i64::MAX
+                // (9223372036854775807), this information is not
+                // known to `i: u64`. So we need to use `try_into()`.
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_7_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::PosInt7(i) = tv {
+                // Even though PosInt6's range
+                // 281474976710656..=72057594037927935 is within
+                // i64::MAX (9223372036854775807), this information is
+                // not known to `i: u64`. So we need to use
+                // `try_into()`.
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_8_i64(tv: TupleValue) -> FdbResult<i64> {
+            if let TupleValue::PosInt8(i) = tv {
+                i.try_into().map_err(|_| tuple_extractor_error())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn pos_int_8_bigint(tv: TupleValue) -> FdbResult<BigInt> {
+            if let TupleValue::PosInt8(i) = tv {
+                Ok(i.into())
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn positive_arbitrary_precision_integer(tv: TupleValue) -> FdbResult<BigInt> {
+            if let TupleValue::PositiveArbitraryPrecisionInteger(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn ieee_binary_floating_point_float(tv: TupleValue) -> FdbResult<f32> {
+            if let TupleValue::IeeeBinaryFloatingPointFloat(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn ieee_binary_floating_point_double(tv: TupleValue) -> FdbResult<f64> {
+            if let TupleValue::IeeeBinaryFloatingPointDouble(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn false_value(tv: TupleValue) -> FdbResult<bool> {
+            if let TupleValue::FalseValue = tv {
+                Ok(false)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn true_value(tv: TupleValue) -> FdbResult<bool> {
+            if let TupleValue::TrueValue = tv {
+                Ok(true)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn rfc_4122_uuid(tv: TupleValue) -> FdbResult<Uuid> {
+            if let TupleValue::Rfc4122Uuid(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+
+        pub(crate) fn versionstamp_96_bit(tv: TupleValue) -> FdbResult<Versionstamp> {
+            if let TupleValue::Versionstamp96Bit(i) = tv {
+                Ok(i)
+            } else {
+                Err(tuple_extractor_error())
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
@@ -1844,8 +2214,8 @@ pub(self) mod parser {
             neg_int_5, neg_int_6, neg_int_7, neg_int_8, negative_arbitrary_precision_integer,
             nested_tuple, nested_tuple_null_value, null_value, pos_int_1, pos_int_2, pos_int_3,
             pos_int_4, pos_int_5, pos_int_6, pos_int_7, pos_int_8,
-            positive_arbitrary_precision_integer, rfc_4122_uuid, true_value, tuple, unicode_string,
-            versionstamp_96_bit, TupleValue,
+            positive_arbitrary_precision_integer, rfc_4122_uuid, true_value, tuple,
+            tuple_extractor, unicode_string, versionstamp_96_bit, TupleValue,
         };
         use crate::tuple::{Tuple, Versionstamp};
         use bytes::Bytes;
@@ -3636,386 +4006,5 @@ pub(self) mod parser {
         //     ];
         //     println!("size_limits_neg_int: {:?}", size_limits_neg);
         // }
-
-        // We usually don't factor out code in tests, as we want as
-        // maximal context relating to the test to be available in one
-        // place. This is an exception as it removes some boilerplate
-        // code and makes the tests easier to read.
-        pub(self) mod tuple_extractor {
-            use super::TupleValue;
-            use crate::error::{FdbError, FdbResult};
-            use crate::tuple::{Tuple, Versionstamp};
-            use bytes::Bytes;
-            use num_bigint::BigInt;
-            use std::convert::TryInto;
-            use uuid::Uuid;
-
-            // This is just a dummy value
-            const TUPLE_EXTRACTOR: i32 = 0xFFFF;
-
-            fn tuple_extractor_error() -> FdbError {
-                FdbError::new(TUPLE_EXTRACTOR)
-            }
-
-            pub(crate) fn null_value(tv: TupleValue) -> FdbResult<()> {
-                if let TupleValue::NullValue = tv {
-                    Ok(())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn nested_tuple_null_value(tv: TupleValue) -> FdbResult<()> {
-                if let TupleValue::NullValue = tv {
-                    Ok(())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn byte_string(tv: TupleValue) -> FdbResult<Bytes> {
-                if let TupleValue::ByteString(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn unicode_string(tv: TupleValue) -> FdbResult<String> {
-                if let TupleValue::UnicodeString(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn nested_tuple(tv: TupleValue) -> FdbResult<Tuple> {
-                if let TupleValue::NestedTuple(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn negative_arbitrary_precision_integer(
-                tv: TupleValue,
-            ) -> FdbResult<BigInt> {
-                if let TupleValue::NegativeArbitraryPrecisionInteger(i) = tv {
-                    Ok(i * -1)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_8_bigint(tv: TupleValue) -> FdbResult<BigInt> {
-                if let TupleValue::NegInt8(i) = tv {
-                    Ok(Into::<BigInt>::into(i) * -1)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_8_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::NegInt8(i) = tv {
-                    (Into::<i128>::into(i) * -1)
-                        .try_into()
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_7_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::NegInt7(i) = tv {
-                    // Even though NegInt5's range
-                    // -72057594037927935..=-281474976710656 is well
-                    // within i64::MIN (-9223372036854775808), this
-                    // information is not known to `i: u64`. So we need to
-                    // use `try_into()`.
-                    i.try_into()
-                        .map(|x: i64| x * -1)
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_6_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::NegInt6(i) = tv {
-                    // Even though NegInt5's range
-                    // -281474976710655..=-1099511627776 is well within
-                    // i64::MIN (-9223372036854775808), this information
-                    // is not known to `i: u64`. So we need to use
-                    // `try_into()`.
-                    i.try_into()
-                        .map(|x: i64| x * -1)
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_5_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::NegInt5(i) = tv {
-                    // Even though NegInt5's range
-                    // -1099511627775..=-4294967296 is well within
-                    // i64::MIN (-9223372036854775808), this information
-                    // is not known to `i: u64`. So we need to use
-                    // `try_into()`.
-                    i.try_into()
-                        .map(|x: i64| x * -1)
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_4_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::NegInt4(i) = tv {
-                    Ok(Into::<i64>::into(i) * -1)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_4_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::NegInt4(i) = tv {
-                    (Into::<i64>::into(i) * -1)
-                        .try_into()
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_3_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::NegInt3(i) = tv {
-                    // Even though NegInt3's range -16777215..=-65536 is
-                    // well within i32::MIN (-2147483648), this
-                    // information is not known to `i: u32`. So, we need
-                    // to use `try_into()`.
-                    i.try_into()
-                        .map(|x: i32| x * -1)
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_2_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::NegInt2(i) = tv {
-                    Ok(Into::<i32>::into(i) * -1)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_2_i16(tv: TupleValue) -> FdbResult<i16> {
-                if let TupleValue::NegInt2(i) = tv {
-                    (Into::<i32>::into(i) * -1)
-                        .try_into()
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_1_i16(tv: TupleValue) -> FdbResult<i16> {
-                if let TupleValue::NegInt1(i) = tv {
-                    Ok(Into::<i16>::into(i) * -1)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn neg_int_1_i8(tv: TupleValue) -> FdbResult<i8> {
-                if let TupleValue::NegInt1(i) = tv {
-                    (Into::<i16>::into(i) * -1)
-                        .try_into()
-                        .map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn int_zero(tv: TupleValue) -> FdbResult<i8> {
-                if let TupleValue::IntZero = tv {
-                    Ok(0)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_1_i8(tv: TupleValue) -> FdbResult<i8> {
-                if let TupleValue::PosInt1(i) = tv {
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_1_i16(tv: TupleValue) -> FdbResult<i16> {
-                if let TupleValue::PosInt1(i) = tv {
-                    Ok(i.into())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_2_i16(tv: TupleValue) -> FdbResult<i16> {
-                if let TupleValue::PosInt2(i) = tv {
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_2_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::PosInt2(i) = tv {
-                    Ok(i.into())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_3_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::PosInt3(i) = tv {
-                    // Even though PosInt3's range 65536..=16777215 is
-                    // within i32::MAX (2147483647), this information is
-                    // not known to `i: u32`. So we need to use
-                    // `try_into()`.
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_4_i32(tv: TupleValue) -> FdbResult<i32> {
-                if let TupleValue::PosInt4(i) = tv {
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_4_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::PosInt4(i) = tv {
-                    Ok(i.into())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_5_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::PosInt5(i) = tv {
-                    // Even though PosInt5's range
-                    // 4294967296..=1099511627775 is within i64::MAX
-                    // (9223372036854775807), this information is not
-                    // known to `i: u64`. So we need to use `try_into()`.
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_6_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::PosInt6(i) = tv {
-                    // Even though PosInt6's range
-                    // 1099511627776..=281474976710655 is within i64::MAX
-                    // (9223372036854775807), this information is not
-                    // known to `i: u64`. So we need to use `try_into()`.
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_7_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::PosInt7(i) = tv {
-                    // Even though PosInt6's range
-                    // 281474976710656..=72057594037927935 is within
-                    // i64::MAX (9223372036854775807), this information is
-                    // not known to `i: u64`. So we need to use
-                    // `try_into()`.
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_8_i64(tv: TupleValue) -> FdbResult<i64> {
-                if let TupleValue::PosInt8(i) = tv {
-                    i.try_into().map_err(|_| tuple_extractor_error())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn pos_int_8_bigint(tv: TupleValue) -> FdbResult<BigInt> {
-                if let TupleValue::PosInt8(i) = tv {
-                    Ok(i.into())
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn positive_arbitrary_precision_integer(
-                tv: TupleValue,
-            ) -> FdbResult<BigInt> {
-                if let TupleValue::PositiveArbitraryPrecisionInteger(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn ieee_binary_floating_point_float(tv: TupleValue) -> FdbResult<f32> {
-                if let TupleValue::IeeeBinaryFloatingPointFloat(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn ieee_binary_floating_point_double(tv: TupleValue) -> FdbResult<f64> {
-                if let TupleValue::IeeeBinaryFloatingPointDouble(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn false_value(tv: TupleValue) -> FdbResult<bool> {
-                if let TupleValue::FalseValue = tv {
-                    Ok(false)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn true_value(tv: TupleValue) -> FdbResult<bool> {
-                if let TupleValue::TrueValue = tv {
-                    Ok(true)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn rfc_4122_uuid(tv: TupleValue) -> FdbResult<Uuid> {
-                if let TupleValue::Rfc4122Uuid(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-
-            pub(crate) fn versionstamp_96_bit(tv: TupleValue) -> FdbResult<Versionstamp> {
-                if let TupleValue::Versionstamp96Bit(i) = tv {
-                    Ok(i)
-                } else {
-                    Err(tuple_extractor_error())
-                }
-            }
-        }
     }
 }

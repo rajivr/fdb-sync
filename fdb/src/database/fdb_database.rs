@@ -1,10 +1,11 @@
+use std::ptr::{self, NonNull};
+use std::sync::Arc;
+
 use crate::database::{Database, DatabaseOption};
 use crate::error::{check, FdbResult};
 use crate::transaction::{
     FdbTransaction, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
 };
-use std::ptr::{self, NonNull};
-use std::sync::Arc;
 
 /// A handle to FDB database. All reads and writes to the database are
 /// transactional.
@@ -146,12 +147,14 @@ impl Database for FdbDatabase {
 
 #[cfg(test)]
 mod tests {
-    use super::FdbDatabase;
     use impls::impls;
+
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
+
+    use super::FdbDatabase;
 
     #[test]
     fn impls() {

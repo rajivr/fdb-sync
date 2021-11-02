@@ -26,23 +26,34 @@ pub const TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT: i32 = 110;
 /// Error occured while trying to add read conflict range.
 pub const TRANSACTION_ADD_READ_CONFLICT_RANGE_IF_NOT_SNAPSHOT: i32 = 111;
 
-// TODO: See if this can be removed?
-/// Error occurred while extracting tuple value.
-pub const TUPLE_EXTRACTOR: i32 = 120;
-
 /// Error occurred while getting a value from the tuple.
-pub const TUPLE_GET: i32 = 121;
+pub const TUPLE_GET: i32 = 120;
 
 /// Error occurred extracting a [`Tuple`] value from [`Bytes`].
 ///
 /// [`Tuple`]: crate::tuple::Tuple
 /// [`Bytes`]: bytes::Bytes
-pub const TUPLE_FROM_BYTES: i32 = 122;
+pub const TUPLE_FROM_BYTES: i32 = 121;
+
+/// Error occured when trying to pack [`Tuple`] containing an
+/// incomplete [`Versionstamp`]. No incomplete [`Versionstamp`] found.
+///
+/// [`Tuple`]:  crate::tuple::Tuple
+/// [`Versionstamp`]: crate::tuple::Versionstamp
+pub const TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND: i32 = 122;
+
+/// Error occured when trying to pack [`Tuple`] containing an
+/// incomplete [`Versionstamp`]. Multiple incomplete [`Versionstamp`]
+/// found.
+///
+/// [`Tuple`]:  crate::tuple::Tuple
+/// [`Versionstamp`]: crate::tuple::Versionstamp
+pub const TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND: i32 = 123;
 
 /// Alias for [`Result`]`<T,`[`FdbError`]`>`
 ///
 /// [`Result`]: std::result::Result
-/// [`FdbError`]: crate::FdbError
+/// [`FdbError`]: crate::error::FdbError
 pub type FdbResult<T> = Result<T, FdbError>;
 
 impl FdbError {

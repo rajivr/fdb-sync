@@ -1,9 +1,10 @@
-use crate::database::FdbDatabase;
-use crate::error::{check, FdbError, FdbResult, DATABASE_OPEN};
 use std::ffi::CString;
 use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
+
+use crate::database::FdbDatabase;
+use crate::error::{check, FdbError, FdbResult, DATABASE_OPEN};
 
 /// Returns [`Database`] handle to the FDB cluster identified by the
 /// provided cluster file.

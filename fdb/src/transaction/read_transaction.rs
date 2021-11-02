@@ -35,7 +35,7 @@ pub trait ReadTransaction {
     fn add_read_conflict_range_if_not_snapshot(&self, range: Range) -> FdbResult<()>;
 
     /// Gets a value from the database.
-    fn get(&self, key: Key) -> FdbFutureMaybeValue;
+    fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t>;
 
     /// Gets an estimate for the number of bytes stored in the given
     /// range.
@@ -49,10 +49,10 @@ pub trait ReadTransaction {
     /// against large ranges for accuracy considerations. For a rough
     /// reference, if the returned size is larger than 3MB, one can
     /// consider the size to be accurate.
-    fn get_estimated_range_size_bytes(&self, range: Range) -> FdbFutureI64;
+    fn get_estimated_range_size_bytes<'t>(&'t self, range: Range) -> FdbFutureI64<'t>;
 
     /// Returns the key referenced by the specificed [`KeySelector`].
-    fn get_key(&self, selector: KeySelector) -> FdbFutureKey;
+    fn get_key<'t>(&'t self, selector: KeySelector) -> FdbFutureKey<'t>;
 
     /// Gets an ordered range of keys and values from the database.
     ///
@@ -71,7 +71,7 @@ pub trait ReadTransaction {
     /// will access the database.
     ///
     /// [`Transaction`]: crate::transaction::Transaction
-    fn get_read_version(&self) -> FdbFutureI64;
+    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t>;
 
     /// Gets whether this transaction is a snapshot view of the
     /// database.

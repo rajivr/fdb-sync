@@ -1,6 +1,7 @@
 //! Provides types for working with FDB range.
 
 use bytes::Bytes;
+
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
@@ -16,7 +17,7 @@ pub use crate::option::StreamingMode;
 /// begin and end key.
 ///
 /// As with all FDB APIs, begin is inclusive, and end exclusive.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Range {
     begin: Key,
     end: Key,
@@ -148,7 +149,7 @@ pub struct RangeResult<'t> {
     end: KeySelector,
     options: RangeOptions,
     snapshot: bool,
-    fut_key_value_array: FdbFutureKeyValueArray,
+    fut_key_value_array: FdbFutureKeyValueArray<'t>,
 }
 
 impl<'t> RangeResult<'t> {
@@ -178,7 +179,7 @@ impl<'t> RangeResult<'t> {
         end: KeySelector,
         options: RangeOptions,
         snapshot: bool,
-        fut_key_value_array: FdbFutureKeyValueArray,
+        fut_key_value_array: FdbFutureKeyValueArray<'t>,
     ) -> RangeResult<'t> {
         RangeResult {
             transaction,
@@ -233,7 +234,7 @@ pub struct RangeResultIter<'t> {
     end: KeySelector,
 
     range_result_iter_state: RangeResultIterState,
-    range_result_iter_state_data: RangeResultIterStateData,
+    range_result_iter_state_data: RangeResultIterStateData<'t>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -245,10 +246,10 @@ enum RangeResultIterState {
 }
 
 #[derive(Debug)]
-enum RangeResultIterStateData {
+enum RangeResultIterStateData<'t> {
     InTransition,
     Fetching {
-        fut_key_value_array: FdbFutureKeyValueArray,
+        fut_key_value_array: FdbFutureKeyValueArray<'t>,
     },
     KeyValueArrayAvailable {
         kv_list: Vec<KeyValue>,
@@ -260,13 +261,13 @@ enum RangeResultIterStateData {
     Done,
 }
 
-enum RangeResultIterEvent {
+enum RangeResultIterEvent<'t> {
     FetchOk {
         kv_list: Vec<KeyValue>,
         more: bool,
     },
     FetchNextBatch {
-        fut_key_value_array: FdbFutureKeyValueArray,
+        fut_key_value_array: FdbFutureKeyValueArray<'t>,
     },
     FetchError {
         fdb_error: FdbError,
@@ -299,7 +300,7 @@ impl<'t> RangeResultIter<'t> {
         }
     }
 
-    fn step_once_with_event(&mut self, event: RangeResultIterEvent) {
+    fn step_once_with_event(&mut self, event: RangeResultIterEvent<'t>) {
         self.range_result_iter_state = match self.range_result_iter_state {
             RangeResultIterState::Fetching => match event {
                 RangeResultIterEvent::FetchOk { kv_list, more } => {
@@ -453,14 +454,14 @@ impl<'t> Iterator for RangeResultIter<'t> {
     }
 }
 
-pub(crate) fn fdb_transaction_get_range(
+pub(crate) fn fdb_transaction_get_range<'t>(
     transaction: *mut fdb_sys::FDBTransaction,
     begin_key: KeySelector,
     end_key: KeySelector,
     options: RangeOptions,
     snapshot: bool,
     iteration: i32,
-) -> FdbFutureKeyValueArray {
+) -> FdbFutureKeyValueArray<'t> {
     let bk = Bytes::from(begin_key.get_key().clone());
     let begin_key_name = bk.as_ref().as_ptr();
     let begin_key_name_length = bk.as_ref().len().try_into().unwrap();
@@ -504,8 +505,9 @@ pub(crate) fn fdb_transaction_get_range(
 
 #[cfg(test)]
 mod tests {
-    use super::{RangeOptions, RangeResult, RangeResultIter};
     use impls::impls;
+
+    use super::{RangeOptions, RangeResult, RangeResultIter};
 
     #[test]
     fn impls() {
@@ -516,7 +518,7 @@ mod tests {
 
         #[rustfmt::skip]
         assert!(impls!(
-	    RangeResult<'static>:
+	    RangeResult<'_>:
 	    IntoIterator &
 	    !Copy &
             !Clone &		
@@ -525,7 +527,7 @@ mod tests {
 
         #[rustfmt::skip]
         assert!(impls!(
-	    RangeResultIter<'static>:
+	    RangeResultIter<'_>:
 	    Iterator &
 	    !Copy &
             !Clone &		

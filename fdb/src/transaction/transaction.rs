@@ -1,11 +1,11 @@
+use bytes::Bytes;
+
 use crate::database::Database;
 use crate::error::{FdbError, FdbResult};
 use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureUnit};
 use crate::range::Range;
 use crate::transaction::{MutationType, ReadTransaction};
 use crate::{Key, Value};
-
-use bytes::Bytes;
 
 /// A [`Transaction`] represents a FDB database transaction.
 ///
@@ -30,7 +30,7 @@ use bytes::Bytes;
 /// been successfully committed, all subsequently created transactions
 /// will see the modifications made by it. The most convenient way for
 /// a developer to manage the lifecycle and retrying of a transaction
-/// is to use `run` method on a type that implements [`Database`]
+/// is to use [`run`] method on a type that implements [`Database`]
 /// trait (for example [`FdbDatabase`]). Otherwise, the client must
 /// have retry logic for fatal failures, failures to commit, and other
 /// transient errors.
@@ -43,7 +43,8 @@ use bytes::Bytes;
 /// [conflicts]: https://apple.github.io/foundationdb/developer-guide.html#developer-guide-transaction-conflicts
 /// [ACID]: https://apple.github.io/foundationdb/developer-guide.html#acid
 /// [`FdbDatabase`]: crate::database::FdbDatabase
-/// [tuple layer]: TODO
+/// [tuple layer]: crate::tuple
+/// [`run`]: crate::transaction::TransactionContext::run
 //
 // NOTE: Unlike Java API, `Transaction` does not extend (i.e., is a
 //       subtrait of) `TransactionContext`. Trying to add
@@ -80,12 +81,12 @@ pub trait Transaction: ReadTransaction {
     fn clear_range(&self, range: Range);
 
     /// Commit this [`Transaction`].
-    fn commit(&self) -> FdbFutureUnit;
+    fn commit<'t>(&'t self) -> FdbFutureUnit<'t>;
 
     /// Returns a future that will contain the approximated size of
     /// the commit, which is the summation of mutations, read conflict
     /// ranges, and write conflict ranges.
-    fn get_approximate_size(&self) -> FdbFutureI64;
+    fn get_approximate_size<'t>(&'t self) -> FdbFutureI64<'t>;
 
     /// Gets the version number at which a successful commit modified
     /// the database.
@@ -100,7 +101,7 @@ pub trait Transaction: ReadTransaction {
 
     /// Returns a future which will contain the versionstamp which was
     /// used by any versionstamp operations in this transaction.
-    fn get_versionstamp(&self) -> FdbFutureKey;
+    fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t>;
 
     /// An atomic operation is a single database command that carries
     /// out several logical steps: reading the value of a key,
@@ -116,7 +117,7 @@ pub trait Transaction: ReadTransaction {
     /// Typical code will not used this method directly. It is used by
     /// `run` and `read` methods when they need to implement correct retry
     /// loop.
-    fn on_error(&self, e: FdbError) -> FdbFutureUnit;
+    fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t>;
 
     /// Sets the value for a given key.
     fn set(&self, key: Key, value: Value);
@@ -138,5 +139,5 @@ pub trait Transaction: ReadTransaction {
     ///
     /// A watch's behavior is relative to the transaction that created
     /// it.
-    fn watch(&self, key: Key) -> FdbFutureUnit;
+    fn watch<'t>(&'t self, key: Key) -> FdbFutureUnit<'t>;
 }

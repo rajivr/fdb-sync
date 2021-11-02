@@ -1,23 +1,43 @@
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use num_bigint::BigInt;
 use num_traits::sign::Signed;
 use uuid::Uuid;
 
-use crate::error::{FdbError, FdbResult, TUPLE_GET};
+use std::cell::RefCell;
+use std::cmp::Ordering;
+use std::convert::TryFrom;
+use std::convert::TryInto;
+
+use crate::error::{FdbError, FdbResult, TUPLE_GET, TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND};
+use crate::range::Range;
 use crate::tuple::{
     element::{self, TupleValue},
     Versionstamp,
 };
 
-use std::convert::TryFrom;
-use std::convert::TryInto;
-
-/// TODO: write documentation, PartialOrd trait, range method
+/// Represents a set of elements that make up a sortable, typed key.
+///
+/// [`Tuple`] is comparable with other [`Tuple`]s and will sort in
+/// Rust in the same order in which they would sort in FDB. [`Tuple`]s
+/// sort first by the first element, then by the second, etc., This
+/// make tuple layer ideal for building a variety of higher-level data
+/// models.
+///
+/// For general guidance on tuple usage, see [this] link.
+///
+/// [`Tuple`] can contain [`null`], [`Bytes`], [`String`], another
+/// [`Tuple`], [`BigInt`], [`i64`], [`i32`], [`i16`], [`i8`], [`f32`],
+/// [`f64`], [`bool`], [`Uuid`], [`Versionstamp`] values.
+///
+/// [layer]: https://github.com/apple/foundationdb/blob/6.3.0/design/tuple.md
+/// [this]: https://apple.github.io/foundationdb/data-modeling.html#tuples
+/// [`null`]: https://github.com/apple/foundationdb/blob/release-6.3/design/tuple.md#null-value
+///
 // NOTE: Unlike the Java API, we do not implement `Iterator` trait, as
 //       that would mean we will have to expose `TupleValue` type to
 //       the client. Instead we provide `size()` method and let the
 //       client call appropriate `get_<type>(...)` methods.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Tuple {
     elements: Vec<TupleValue>,
     // This is `true` *only* when `Tuple` contains a `Versionstamp`
@@ -31,6 +51,10 @@ pub struct Tuple {
     // value to `true`. It is only when incomplete `Versionstamp` is
     // added, that this value changes to `true`.
     has_incomplete_versionstamp: bool,
+    // Cached version packed representation. This makes the `Tuple`
+    // type `!Sync`, which is fine as our main use-case is to run most
+    // of FDB related code inside a thread using Tokio threadpool.
+    packed: RefCell<Option<Bytes>>,
 }
 
 impl Tuple {
@@ -39,6 +63,7 @@ impl Tuple {
         Tuple {
             elements: Vec::new(),
             has_incomplete_versionstamp: false,
+            packed: RefCell::new(None),
         }
     }
 
@@ -51,21 +76,29 @@ impl Tuple {
     ///
     /// [`null`]: https://github.com/apple/foundationdb/blob/release-6.3/design/tuple.md#null-value
     pub fn add_null(&mut self) {
+        self.clear_cached_packed();
+
         self.elements.push(TupleValue::NullValue);
     }
 
     /// Append [`Bytes`] value to the [`Tuple`].
     pub fn add_bytes(&mut self, b: Bytes) {
+        self.clear_cached_packed();
+
         self.elements.push(TupleValue::ByteString(b));
     }
 
     /// Append [`String`] value to the [`Tuple`].
     pub fn add_string(&mut self, s: String) {
+        self.clear_cached_packed();
+
         self.elements.push(TupleValue::UnicodeString(s));
     }
 
     /// Append [`Tuple`] value to the [`Tuple`]
     pub fn add_tuple(&mut self, t: Tuple) {
+        self.clear_cached_packed();
+
         self.has_incomplete_versionstamp =
             self.has_incomplete_versionstamp || t.has_incomplete_versionstamp();
         self.elements.push(TupleValue::NestedTuple(t));
@@ -75,9 +108,11 @@ impl Tuple {
     ///
     /// # Panic
     ///
-    /// Panics if the [`Byte`] encoded length of the [`BigInt`] is
+    /// Panics if the [`Bytes`] encoded length of the [`BigInt`] is
     /// greater than 255.
     pub fn add_bigint(&mut self, i: BigInt) {
+        self.clear_cached_packed();
+
         let _ = i64::try_from(i.clone())
             .map(|x| self.add_i64(x))
             .map_err(|_| {
@@ -130,6 +165,8 @@ impl Tuple {
 
     /// Append [`i64`] value to the [`Tuple`]
     pub fn add_i64(&mut self, i: i64) {
+        self.clear_cached_packed();
+
         let _ = i32::try_from(i).map(|x| self.add_i32(x)).map_err(|_| {
             if i.is_negative() {
                 match i {
@@ -183,6 +220,8 @@ impl Tuple {
 
     /// Append [`i32`] value to the [`Tuple`]
     pub fn add_i32(&mut self, i: i32) {
+        self.clear_cached_packed();
+
         let _ = i16::try_from(i).map(|x| self.add_i16(x)).map_err(|_| {
             if i.is_negative() {
                 match i {
@@ -216,6 +255,8 @@ impl Tuple {
 
     /// Append [`i16`] value to the [`Tuple`].
     pub fn add_i16(&mut self, i: i16) {
+        self.clear_cached_packed();
+
         let _ = i8::try_from(i).map(|x| self.add_i8(x)).map_err(|_| {
             if i.is_negative() {
                 match i {
@@ -243,6 +284,8 @@ impl Tuple {
 
     /// Append [`i8`] value to the [`Tuple`].
     pub fn add_i8(&mut self, i: i8) {
+        self.clear_cached_packed();
+
         match i {
             i8::MIN..=-1 => self.elements.push(TupleValue::NegInt1(i.unsigned_abs())),
             0 => self.elements.push(TupleValue::IntZero),
@@ -258,6 +301,8 @@ impl Tuple {
     ///
     /// [`0x20`]: https://github.com/apple/foundationdb/blob/release-6.3/design/tuple.md#ieee-binary-floating-point
     pub fn add_f32(&mut self, f: f32) {
+        self.clear_cached_packed();
+
         self.elements
             .push(TupleValue::IeeeBinaryFloatingPointFloat(f));
     }
@@ -270,12 +315,16 @@ impl Tuple {
     ///
     /// [`0x21`]: https://github.com/apple/foundationdb/blob/release-6.3/design/tuple.md#ieee-binary-floating-point
     pub fn add_f64(&mut self, f: f64) {
+        self.clear_cached_packed();
+
         self.elements
             .push(TupleValue::IeeeBinaryFloatingPointDouble(f));
     }
 
     /// Append [`bool`] value to the [`Tuple`].
     pub fn add_bool(&mut self, b: bool) {
+        self.clear_cached_packed();
+
         if b {
             self.elements.push(TupleValue::TrueValue);
         } else {
@@ -285,17 +334,23 @@ impl Tuple {
 
     /// Append [`Uuid`] value to the [`Tuple`].
     pub fn add_uuid(&mut self, u: Uuid) {
+        self.clear_cached_packed();
+
         self.elements.push(TupleValue::Rfc4122Uuid(u));
     }
 
     /// Append [`Versionstamp`] value to the [`Tuple`]    
     pub fn add_versionstamp(&mut self, v: Versionstamp) {
+        self.clear_cached_packed();
+
         self.has_incomplete_versionstamp = self.has_incomplete_versionstamp || (!v.is_complete());
         self.elements.push(TupleValue::Versionstamp96Bit(v));
     }
 
     /// Append elements of [`Tuple`] `t` to [`Tuple`] `Self`
     pub fn append(&mut self, mut t: Tuple) {
+        self.clear_cached_packed();
+
         self.has_incomplete_versionstamp =
             self.has_incomplete_versionstamp || t.has_incomplete_versionstamp();
 
@@ -618,21 +673,74 @@ impl Tuple {
 
     /// Get an encoded representation of this [`Tuple`].
     pub fn pack(&self) -> Bytes {
-        todo!();
+        if self.packed.borrow().is_none() {
+            let b = element::to_bytes(self.clone());
+            *(self.packed.borrow_mut()) = Some(b.clone());
+            b
+        } else {
+            // Safe to unwrap as we are checking for `None` case above.
+            self.packed.borrow().as_ref().unwrap().clone()
+        }
     }
 
     /// Get an encoded representation of this [`Tuple`] for use with
     /// [`SetVersionstampedKey`].
     ///
+    /// # Panic
+    ///
+    /// The index where incomplete versionstamp is located is a 32-bit
+    /// little-endian integer. If the generated index overflows
+    /// [`u32`], then this function panics.
+    ///
     /// [`SetVersionstampedKey`]: crate::transaction::MutationType::SetVersionstampedKey
-    // TODO: returns error if you attempt to pack
-    // find_incomplete_versionstamp
-    //
-    // tuple can contain only one incomplete versionstamp. Also either
-    // a "key" or "value" can have a versionstamp but not both.
-    //
-    pub fn pack_with_versionstamp(prefix: Bytes) -> FdbResult<Bytes> {
-        todo!();
+    pub fn pack_with_versionstamp(&self, prefix: Bytes) -> FdbResult<Bytes> {
+        if self.has_incomplete_versionstamp() {
+            element::find_incomplete_versionstamp(self.clone()).map(|x| {
+                let index = TryInto::<u32>::try_into(x + prefix.len()).unwrap();
+
+                let mut res = BytesMut::new();
+
+                res.put(prefix);
+                res.put(self.pack());
+                res.put_u32_le(index);
+
+                res.into()
+            })
+        } else {
+            Err(FdbError::new(TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND))
+        }
+    }
+
+    /// Returns a range representing all keys that encode [`Tuple`]s
+    /// strictly starting with this [`Tuple`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the tuple contains an incomplete [`Versionstamp`].
+    pub fn range(&self, prefix: Bytes) -> Range {
+        if self.has_incomplete_versionstamp() {
+            panic!("Cannot create Range value as tuple contains an incomplete versionstamp");
+        }
+
+        let begin = {
+            let mut x = BytesMut::new();
+            x.put(prefix.clone());
+            x.put(self.pack());
+            x.put_u8(0x00);
+            Into::<Bytes>::into(x)
+        }
+        .into();
+
+        let end = {
+            let mut x = BytesMut::new();
+            x.put(prefix);
+            x.put(self.pack());
+            x.put_u8(0xFF);
+            Into::<Bytes>::into(x)
+        }
+        .into();
+
+        Range::new(begin, end)
     }
 
     pub(crate) fn from_elements(elements: Vec<TupleValue>) -> Tuple {
@@ -645,6 +753,17 @@ impl Tuple {
         Tuple {
             elements,
             has_incomplete_versionstamp,
+            packed: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn to_elements(self) -> Vec<TupleValue> {
+        self.elements
+    }
+
+    fn clear_cached_packed(&mut self) {
+        if self.packed.borrow().is_some() {
+            *(self.packed.borrow_mut()) = None;
         }
     }
 
@@ -653,21 +772,59 @@ impl Tuple {
     }
 }
 
+impl PartialEq for Tuple {
+    fn eq(&self, other: &Self) -> bool {
+        self.pack().eq(&other.pack())
+    }
+}
+
+impl Eq for Tuple {}
+
+impl PartialOrd for Tuple {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.pack().partial_cmp(&other.pack())
+    }
+}
+
+impl Ord for Tuple {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.pack().cmp(&other.pack())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Tuple;
-
-    use crate::error::{FdbError, TUPLE_FROM_BYTES};
-    use crate::tuple::{element::TupleValue, Versionstamp};
-
     use bytes::Bytes;
+    use impls::impls;
     use num_bigint::BigInt;
     use uuid::Uuid;
 
+    use crate::error::{
+        FdbError, TUPLE_FROM_BYTES, TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND,
+        TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND,
+    };
+    use crate::range::Range;
+    use crate::tuple::{element::TupleValue, Versionstamp};
+
+    use super::Tuple;
+
+    #[test]
+    fn impls() {
+        #[rustfmt::skip]
+	assert!(impls!(
+	    Tuple:
+	        PartialEq<Tuple> &
+                Eq &
+                PartialOrd<Tuple> &
+                Ord &
+		!Sync
+	));
+    }
+
     #[test]
     fn from_bytes() {
-        //  For additonal tests, see the tests for `parsers::tuple`
-        //  (`test_tuple`) in `element.rs`.
+        // For additonal tests, see the tests for `parsers::tuple`
+        // (`test_tuple`) in `element.rs`.
         assert_eq!(
             Tuple::from_bytes(Bytes::from_static(&b"\x00moredata"[..])),
             Err(FdbError::new(TUPLE_FROM_BYTES)),
@@ -1431,6 +1588,650 @@ mod tests {
         t.add_null();
 
         assert_eq!(t.size(), 1);
+    }
+
+    #[test]
+    fn pack() {
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(0);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x14"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"0", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x14"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(1);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x15\x01"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"1", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x15\x01"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(-1);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x13\xFE"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"-1", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x13\xFE"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(255);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x15\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"255", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x15\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(-255);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x13\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"-255", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x13\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(256);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x16\x01\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"256", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x16\x01\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i32(65536);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x17\x01\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i32(-65536);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x11\xFE\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(i64::MAX);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x1C\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"9223372036854775807", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x1C\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"9223372036854775808", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x1C\x80\x00\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"18446744073709551615", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x1C\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"18446744073709551616", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x1D\x09\x01\x00\x00\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(-4294967295);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x10\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"-4294967295", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x10\x00\x00\x00\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(i64::MIN + 2);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x80\x00\x00\x00\x00\x00\x00\x01"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(i64::MIN + 1);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x80\x00\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(
+                    // i64::MIN + 1
+                    BigInt::parse_bytes(b"-9223372036854775808", 10).unwrap() + 1,
+                );
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x80\x00\x00\x00\x00\x00\x00\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i64(i64::MIN);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(
+                    // i64::MIN
+                    BigInt::parse_bytes(b"-9223372036854775808", 10).unwrap(),
+                );
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(
+                    // i64::MIN - 1
+                    BigInt::parse_bytes(b"-9223372036854775808", 10).unwrap() - 1,
+                );
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFE"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bigint(BigInt::parse_bytes(b"-18446744073709551615", 10).unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x0C\x00\x00\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(3.14f32);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\xC0\x48\xF5\xC3"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(-3.14f32);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\x3F\xB7\x0A\x3C"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(3.14f64);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\xC0\x09\x1E\xB8\x51\xEB\x85\x1F"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(-3.14f64);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\x3F\xF6\xE1\x47\xAE\x14\x7A\xE0"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(0.0f32);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\x80\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(-0.0f32);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\x7F\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(0.0f64);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\x80\x00\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(-0.0f64);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(f32::INFINITY);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\xFF\x80\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f32(f32::NEG_INFINITY);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x20\x00\x7F\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(f64::INFINITY);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\xFF\xF0\x00\x00\x00\x00\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_f64(f64::NEG_INFINITY);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x21\x00\x0F\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bytes(Bytes::from_static(&b""[..]));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x01\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bytes(Bytes::from_static(&b"\x01\x02\x03"[..]));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x01\x01\x02\x03\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bytes(Bytes::from_static(&b"\x00\x00\x00\x04"[..]));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x01\x00\xFF\x00\xFF\x00\xFF\x04\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x02\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("hello".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x02hello\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("中文".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x02\xE4\xB8\xAD\xE6\x96\x87\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("μάθημα".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x02\xCE\xBC\xCE\xAC\xCE\xB8\xCE\xB7\xCE\xBC\xCE\xB1\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("\u{10ffff}".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x02\xF4\x8F\xBF\xBF\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_null();
+                    t1
+                });
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x05\x00\xFF\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_null();
+                    t1.add_string("hello".to_string());
+                    t1
+                });
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x05\x00\xFF\x02hello\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_null();
+                    t1.add_string("hell\x00".to_string());
+                    t1
+                });
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x05\x00\xFF\x02hell\x00\xFF\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_null();
+                    t1
+                });
+                t.add_string("hello".to_string());
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x05\x00\xFF\x00\x02hello\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_null();
+                    t1
+                });
+                t.add_string("hello".to_string());
+                t.add_bytes(Bytes::from_static(&b"\x01\x00"[..]));
+                t.add_bytes(Bytes::from_static(&b""[..]));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x05\x00\xFF\x00\x02hello\x00\x01\x01\x00\xFF\x00\x01\x00"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_uuid(Uuid::parse_str("ffffffff-ba5e-ba11-0000-00005ca1ab1e").unwrap());
+                t
+            }
+            .pack(),
+            Bytes::from_static(
+                &b"\x30\xFF\xFF\xFF\xFF\xBA\x5E\xBA\x11\x00\x00\x00\x00\x5C\xA1\xAB\x1E"[..]
+            )
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bool(false);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x26"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bool(true);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x27"[..]),
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_i8(3);
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x15\x03"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_versionstamp(Versionstamp::complete(
+                    Bytes::from_static(&b"\xAA\xBB\xCC\xDD\xEE\xFF\x00\x01\x02\x03"[..]),
+                    0,
+                ));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x33\xAA\xBB\xCC\xDD\xEE\xFF\x00\x01\x02\x03\x00\x00"[..])
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_versionstamp(Versionstamp::complete(
+                    Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                    657,
+                ));
+                t
+            }
+            .pack(),
+            Bytes::from_static(&b"\x33\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x02\x91"[..])
+        );
+    }
+
+    #[test]
+    fn pack_with_versionstamp() {
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_string("foo".to_string());
+                t.add_versionstamp(Versionstamp::incomplete(0));
+                t
+            }
+            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            Ok(Bytes::from_static(
+                &b"\x02foo\x00\x33\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x00\x00\x06\x00\x00\x00"
+                    [..]
+            ))
+        );
+        assert_eq!(
+            {
+                let t = Tuple::new();
+                t
+            }
+            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            Err(FdbError::new(TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND))
+        );
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_null();
+                t.add_versionstamp(Versionstamp::incomplete(0));
+                t.add_tuple({
+                    let mut t1 = Tuple::new();
+                    t1.add_string("foo".to_string());
+                    t1.add_versionstamp(Versionstamp::incomplete(1));
+                    t1
+                });
+                t
+            }
+            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            Err(FdbError::new(TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND))
+        );
+    }
+
+    #[test]
+    fn range() {
+        assert!(std::panic::catch_unwind(|| {
+            {
+                let mut t = Tuple::new();
+                t.add_versionstamp(Versionstamp::incomplete(0));
+                t
+            }
+            .range(Bytes::from_static(&b""[..]));
+        })
+        .is_err());
+        assert_eq!(
+            {
+                let mut t = Tuple::new();
+                t.add_bytes(Bytes::from_static(&b"bar"[..]));
+                t
+            }
+            .range(Bytes::from_static(&b"foo"[..])),
+            Range::new(
+                Bytes::from_static(&b"foo\x01bar\x00\x00"[..]).into(),
+                Bytes::from_static(&b"foo\x01bar\x00\xFF"[..]).into()
+            )
+        );
     }
 
     #[test]

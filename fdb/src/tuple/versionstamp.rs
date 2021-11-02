@@ -12,6 +12,10 @@ use bytes::{Bytes, BytesMut};
 // bytes. The user can manually add 2 additional bytes to provide
 // application level ordering.
 //
+// `VERSIONSTAMP_TR_VERSION_LEN` below is the `fdb_c` client level
+// versionstamp. When `VERSIONSTAMP_TR_VERSION` is all `\xFF`, it
+// means that versionstamp is "incomplete".
+//
 // [1]: https://apple.github.io/foundationdb/data-modeling.html#versionstamps
 const VERSIONSTAMP_TR_VERSION_LEN: usize = 10;
 const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
@@ -42,12 +46,10 @@ const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 /// is usually the case if one is reading back a Versionstamp from the
 /// database.
 ///
-/// [TODO] Code example
-///
 /// [`Tuple`]: crate::tuple::Tuple
 /// [`get_versionstamp`]: crate::transaction::Transaction::get_versionstamp
 /// [`Transaction`]: crate::transaction::Transaction
-#[derive(Clone, Ord, Eq, PartialOrd, PartialEq, Hash, Debug)]
+#[derive(Clone, Ord, Eq, PartialOrd, PartialEq, Debug)]
 pub struct Versionstamp {
     complete: bool,
     tr_version: Bytes,
@@ -92,11 +94,13 @@ impl Versionstamp {
         // If we find any of the bytes to be not `0xFF`, then it means
         // that versionstamp is in complete state.
         let mut complete = false;
-        &version_bytes[..].into_iter().for_each(|x| {
-            if *x != 0xFF {
-                complete = true;
-            }
-        });
+        &version_bytes[0..VERSIONSTAMP_TR_VERSION_LEN]
+            .into_iter()
+            .for_each(|x| {
+                if *x != 0xFF {
+                    complete = true;
+                }
+            });
 
         let tr_version = version_bytes.slice(0..VERSIONSTAMP_TR_VERSION_LEN);
         let user_version = version_bytes.slice(VERSIONSTAMP_TR_VERSION_LEN..).get_u16();
@@ -112,7 +116,7 @@ impl Versionstamp {
     /// user version.
     pub fn incomplete(user_version: u16) -> Versionstamp {
         let complete = false;
-        let tr_version = Bytes::new();
+        let tr_version = Bytes::from_static(&b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..]);
 
         Versionstamp {
             complete,
@@ -126,6 +130,7 @@ impl Versionstamp {
         let mut buf =
             BytesMut::with_capacity(VERSIONSTAMP_TR_VERSION_LEN + VERSIONSTAMP_USER_VERSION_LEN);
         buf.put(self.tr_version.clone());
+
         buf.put_u16(self.user_version);
         buf.into()
     }
