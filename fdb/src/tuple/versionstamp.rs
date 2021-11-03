@@ -42,13 +42,47 @@ const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 /// version. For example, this might be used with a [`Versionstamp`] that
 /// one wants to fill in with the current transaction's version
 /// information. A "complete" [`Versionstamp`], in contradistinction, is
-/// one that has been assigned a meaningful transaction version. This
+/// one that *has* been assigned a meaningful transaction version. This
 /// is usually the case if one is reading back a Versionstamp from the
 /// database.
+///
+/// Example usage might be to do something like the following:
+///
+/// ```ignore
+/// let vs = fdb_database
+///     .run(|tr| {
+///         let mut t = Tuple::new();
+///         t.add_versionstamp(Versionstamp::incomplete(0));
+///         tr.mutate(
+///             MutationType::SetVersionstampedKey,
+///             (t.pack_with_versionstamp(Bytes::from_static(&b"prefix"[..])))
+///                 .unwrap()
+///                 .into(),
+///             Bytes::from_static(&b""[..]),
+///         );
+///
+///	    let vs_fut = tr.get_versionstamp();
+///
+///         tr.commit().join()?;
+///
+///	    let vs = vs_fut.join()?;
+///
+///	    Ok(vs)
+///     })
+///     .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
+///
+/// println!("10 byte fdb_c level versionstamp: {:?}", vs);
+/// ```
+///
+/// Here, an incomplete [`Versionstamp`] is packed and written to the
+/// database with [`SetVersionstampedKey`] mutation type.
+///
+/// TODO: Complete this documentation after subspace layer is complete.
 ///
 /// [`Tuple`]: crate::tuple::Tuple
 /// [`get_versionstamp`]: crate::transaction::Transaction::get_versionstamp
 /// [`Transaction`]: crate::transaction::Transaction
+/// [`SetVersionstampedKey`]: crate::transaction::MutationType::SetVersionstampedKey
 #[derive(Clone, Ord, Eq, PartialOrd, PartialEq, Debug)]
 pub struct Versionstamp {
     complete: bool,
@@ -151,5 +185,130 @@ impl Versionstamp {
     /// meaningful.
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::Versionstamp;
+
+    #[test]
+    fn complete() {
+        assert!(std::panic::catch_unwind(|| {
+            Versionstamp::complete(Bytes::from_static(&b"invalid"[..]), 0)
+        })
+        .is_err());
+
+        assert_eq!(
+            Versionstamp::complete(
+                Bytes::from_static(&b"\xAA\xBB\xCC\xDD\xEE\xFF\x00\x01\x02\x03"[..]),
+                0
+            ),
+            Versionstamp {
+                complete: true,
+                tr_version: Bytes::from_static(&b"\xAA\xBB\xCC\xDD\xEE\xFF\x00\x01\x02\x03"[..]),
+                user_version: 0
+            }
+        );
+    }
+
+    #[test]
+    fn from_bytes() {
+        assert!(std::panic::catch_unwind(|| {
+            Versionstamp::from_bytes(Bytes::from_static(&b"invalid"[..]))
+        })
+        .is_err());
+
+        assert_eq!(
+            Versionstamp::from_bytes(Bytes::from_static(
+                &b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x02\x91"[..]
+            )),
+            Versionstamp::incomplete(657)
+        );
+
+        assert_eq!(
+            Versionstamp::from_bytes(Bytes::from_static(
+                &b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x02\x91"[..]
+            )),
+            Versionstamp::complete(
+                Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                657
+            )
+        );
+    }
+
+    #[test]
+    fn incomplete() {
+        assert_eq!(
+            Versionstamp::incomplete(657),
+            Versionstamp {
+                complete: false,
+                tr_version: Bytes::from_static(&b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..]),
+                user_version: 657
+            }
+        );
+    }
+
+    #[test]
+    fn get_bytes() {
+        assert_eq!(
+            (Versionstamp::complete(
+                Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                657
+            ))
+            .get_bytes(),
+            Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x02\x91"[..])
+        );
+        assert_eq!(
+            (Versionstamp::incomplete(657)).get_bytes(),
+            Bytes::from_static(&b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x02\x91"[..])
+        );
+    }
+
+    #[test]
+    fn get_transaction_version() {
+        assert_eq!(
+            (Versionstamp::complete(
+                Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                657
+            ))
+            .get_transaction_version(),
+            Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..])
+        );
+
+        assert_eq!(
+            (Versionstamp::incomplete(657)).get_transaction_version(),
+            Bytes::from_static(&b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"[..])
+        );
+    }
+
+    #[test]
+    fn get_user_version() {
+        assert_eq!(
+            (Versionstamp::complete(
+                Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                657
+            ))
+            .get_user_version(),
+            657
+        );
+
+        assert_eq!((Versionstamp::incomplete(657)).get_user_version(), 657);
+    }
+
+    #[test]
+    fn is_complete() {
+        assert_eq!(
+            (Versionstamp::complete(
+                Bytes::from_static(&b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"[..]),
+                657
+            ))
+            .is_complete(),
+            true
+        );
+
+        assert_eq!((Versionstamp::incomplete(657)).is_complete(), false);
     }
 }

@@ -27,18 +27,18 @@ fn main() {
                 Bytes::from_static(&b""[..]),
             );
 
-	    let vs_fut = tr.get_versionstamp();
+            let vs_fut = tr.get_versionstamp();
 
             tr.commit().join()?;
 
-	    let vs = vs_fut.join()?;
+            let vs = vs_fut.join()?;
 
-	    Ok(vs)
+            Ok(vs)
         })
         .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
 
     println!("10 byte fdb_c level versionstamp: {:?}", vs);
-    
+
     unsafe {
         fdb::stop_network();
     }
