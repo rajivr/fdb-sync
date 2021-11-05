@@ -43,7 +43,9 @@ where
     // NOTE: `join` takes ownership of `FdbFuture`. This is an
     //       important aspect of the API design, as we rely on
     //       `Drop::drop` in order to call
-    //       `fdb_sys::fdb_future_destroy`.
+    //       `fdb_sys::fdb_future_destroy`. If we don't call
+    //       `fdb_sys::fdb_future_destroy`, then memory owned by FDB
+    //       future won't be freed.
     pub fn join(self) -> FdbResult<T> {
         let fut_c_ptr = (&self.c_ptr.as_ref().unwrap()).as_ptr();
 

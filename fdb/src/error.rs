@@ -11,6 +11,7 @@
 // 100 - `database` module
 // 110 - `transaction` module
 // 120 - `tuple` module
+// 130 - `subspace` module
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct FdbError {
     /// FoundationDB error code `fdb_error_t`
@@ -49,6 +50,20 @@ pub const TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND: i32 = 122;
 /// [`Tuple`]:  crate::tuple::Tuple
 /// [`Versionstamp`]: crate::tuple::Versionstamp
 pub const TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND: i32 = 123;
+
+/// Error occured when trying to pack [`Subspace`] containing an
+/// incomplete [`Versionstamp`]. Prefix contains an incomplete
+/// [`Versionstamp`], which is not allowed.
+///
+/// [`Subspace`]:  crate::subspace::Subspace
+/// [`Versionstamp`]: crate::tuple::Versionstamp
+pub const SUBSPACE_PACK_WITH_VERSIONSTAMP_PREFIX_INCOMPLETE: i32 = 130;
+
+/// Error occured when trying to unpack a key. The provided key is not
+/// contained in the [`Subspace`].
+///
+/// [`Subspace`]:  crate::subspace::Subspace
+pub const SUBSPACE_UNPACK_KEY_MISMATCH: i32 = 131;
 
 /// Alias for [`Result`]`<T,`[`FdbError`]`>`
 ///

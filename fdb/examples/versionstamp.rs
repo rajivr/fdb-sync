@@ -24,7 +24,7 @@ fn main() {
                 (t.pack_with_versionstamp(Bytes::from_static(&b"prefix"[..])))
                     .unwrap()
                     .into(),
-                Bytes::from_static(&b""[..]),
+                Bytes::new(),
             );
 
             let vs_fut = tr.get_versionstamp();

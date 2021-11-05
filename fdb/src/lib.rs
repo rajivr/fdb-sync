@@ -27,6 +27,7 @@ pub mod database;
 pub mod error;
 pub mod future;
 pub mod range;
+pub mod subspace;
 pub mod transaction;
 pub mod tuple;
 

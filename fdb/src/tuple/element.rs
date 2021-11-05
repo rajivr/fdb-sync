@@ -992,7 +992,7 @@ pub(self) mod serializer {
                 Bytes::from_static(&b"\x01foo\x00\xFFbar\x00"[..]),
             );
             assert_eq!(
-                byte_string(Bytes::from_static(&b""[..])),
+                byte_string(Bytes::new()),
                 Bytes::from_static(&b"\x01\x00"[..]),
             );
             assert_eq!(
@@ -2220,7 +2220,7 @@ pub(self) mod parser {
                 tuple(&b"\x01\x00"[..]),
                 Ok((&b""[..], {
                     let mut t = Tuple::new();
-                    t.add_bytes(Bytes::from_static(&b""[..]));
+                    t.add_bytes(Bytes::new());
                     t
                 }))
             );
@@ -2342,7 +2342,7 @@ pub(self) mod parser {
                     });
                     t.add_string("hello".to_string());
                     t.add_bytes(Bytes::from_static(&b"\x01\x00"[..]));
-                    t.add_bytes(Bytes::from_static(&b""[..]));
+                    t.add_bytes(Bytes::new());
                     t
                 }))
             );
@@ -2447,17 +2447,11 @@ pub(self) mod parser {
         fn test_byte_string() {
             assert_eq!(
                 byte_string(&b"\x01\x00"[..]),
-                Ok((
-                    &b""[..],
-                    TupleValue::ByteString(Bytes::from_static(&b""[..]))
-                ))
+                Ok((&b""[..], TupleValue::ByteString(Bytes::new())))
             );
             assert_eq!(
                 byte_string(&b"\x01\x00moredata"[..]),
-                Ok((
-                    &b"moredata"[..],
-                    TupleValue::ByteString(Bytes::from_static(&b""[..]))
-                ))
+                Ok((&b"moredata"[..], TupleValue::ByteString(Bytes::new())))
             );
             assert_eq!(
                 byte_string(&b"\x01\x01\x02\x03\x00"[..]),

@@ -1964,7 +1964,7 @@ mod tests {
         assert_eq!(
             {
                 let mut t = Tuple::new();
-                t.add_bytes(Bytes::from_static(&b""[..]));
+                t.add_bytes(Bytes::new());
                 t
             }
             .pack(),
@@ -2098,7 +2098,7 @@ mod tests {
                 });
                 t.add_string("hello".to_string());
                 t.add_bytes(Bytes::from_static(&b"\x01\x00"[..]));
-                t.add_bytes(Bytes::from_static(&b""[..]));
+                t.add_bytes(Bytes::new());
                 t
             }
             .pack(),
@@ -2177,7 +2177,7 @@ mod tests {
                 t.add_versionstamp(Versionstamp::incomplete(0));
                 t
             }
-            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            .pack_with_versionstamp(Bytes::new()),
             Ok(Bytes::from_static(
                 &b"\x02foo\x00\x33\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x00\x00\x06\x00\x00\x00"
                     [..]
@@ -2188,7 +2188,7 @@ mod tests {
                 let t = Tuple::new();
                 t
             }
-            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            .pack_with_versionstamp(Bytes::new()),
             Err(FdbError::new(TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND))
         );
         assert_eq!(
@@ -2204,7 +2204,7 @@ mod tests {
                 });
                 t
             }
-            .pack_with_versionstamp(Bytes::from_static(&b""[..])),
+            .pack_with_versionstamp(Bytes::new()),
             Err(FdbError::new(TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND))
         );
     }
@@ -2217,7 +2217,7 @@ mod tests {
                 t.add_versionstamp(Versionstamp::incomplete(0));
                 t
             }
-            .range(Bytes::from_static(&b""[..]));
+            .range(Bytes::new());
         })
         .is_err());
         assert_eq!(

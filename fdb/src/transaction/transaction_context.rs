@@ -2,6 +2,9 @@ use crate::database::Database;
 use crate::error::FdbResult;
 use crate::transaction::{ReadTransactionContext, Transaction};
 
+// TODO: Introduce `run_and_get_versionstamp` API and also factor out
+// error checking for values between 100-999
+
 /// The context in which [`Transaction`] is available for database
 /// operations.
 ///
