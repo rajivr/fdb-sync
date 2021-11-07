@@ -84,5 +84,11 @@ pub trait ReadTransaction {
 
     /// Directly sets the version of the database at which to execute
     /// reads.
-    fn set_read_version(&self, version: i64);
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_set_read_version
+    unsafe fn set_read_version(&self, version: i64);
 }

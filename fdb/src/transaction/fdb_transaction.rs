@@ -12,10 +12,7 @@ use crate::error::{
 use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
 use crate::option::ConflictRangeType;
 use crate::range::{fdb_transaction_get_range, Range, RangeOptions, RangeResult};
-use crate::transaction::{
-    MutationType, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
-    TransactionOption,
-};
+use crate::transaction::{MutationType, ReadTransaction, Transaction, TransactionOption};
 use crate::{Key, KeySelector, Value};
 
 /// A handle to a FDB transaction.
@@ -25,6 +22,14 @@ use crate::{Key, KeySelector, Value};
 ///
 /// [`create_transaction`]: crate::database::Database::create_transaction
 /// [`Database`]: crate::database::Database
+//
+// NOTE: `FdbTransaction` being `!Send + !Sync` is a *very* important
+//       part of the API design. The *only* way to create a value of
+//       `FdbTransaction` type is by `Database::create_transaction`
+//       method. Once a value of `FdbTransaction` is created, it can
+//       *only* be moved around in the thread that it was created in
+//       and dropped in that thread. This is what allows us to safely
+//       return `TransactionContext::run_and_get_transaction` method.
 #[derive(Debug)]
 pub struct FdbTransaction {
     c_ptr: Option<NonNull<fdb_sys::FDBTransaction>>,
@@ -56,16 +61,6 @@ impl Drop for FdbTransaction {
         self.c_ptr.take().map(|x| unsafe {
             fdb_sys::fdb_transaction_destroy(x.as_ptr());
         });
-    }
-}
-
-impl ReadTransactionContext for FdbTransaction {
-    fn read<T, F>(&self, f: F) -> FdbResult<T>
-    where
-        Self: Sized,
-        F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
-    {
-        f(self)
     }
 }
 
@@ -179,23 +174,11 @@ impl ReadTransaction for FdbTransaction {
         internal::read_transaction::set_option((self.c_ptr.unwrap()).as_ptr(), option)
     }
 
-    fn set_read_version(&self, version: i64) {
+    unsafe fn set_read_version(&self, version: i64) {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
         internal::read_transaction::set_read_version((self.c_ptr.unwrap()).as_ptr(), version)
-    }
-}
-
-impl TransactionContext for FdbTransaction {
-    type Database = FdbDatabase;
-
-    fn run<T, F>(&self, f: F) -> FdbResult<T>
-    where
-        Self: Sized,
-        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
-    {
-        f(self)
     }
 }
 
@@ -268,13 +251,11 @@ impl Transaction for FdbTransaction {
         )
     }
 
-    fn cancel(&self) {
-        unsafe {
-            // Safety: It is safe to unwrap here because if we have a
-            // `self: &FdbTransaction`, then `c_ptr` *must* be
-            // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_cancel((self.c_ptr.unwrap()).as_ptr());
-        }
+    unsafe fn cancel(&self) {
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        fdb_sys::fdb_transaction_cancel((self.c_ptr.unwrap()).as_ptr());
     }
 
     fn clear(&self, key: Key) {
@@ -319,13 +300,13 @@ impl Transaction for FdbTransaction {
         }
     }
 
-    fn commit<'t>(&'t self) -> FdbFutureUnit<'t> {
-        FdbFuture::new(unsafe {
+    unsafe fn commit<'t>(&'t self) -> FdbFutureUnit<'t> {
+        FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
             // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_commit((self.c_ptr.unwrap()).as_ptr())
-        })
+            fdb_sys::fdb_transaction_commit((self.c_ptr.unwrap()).as_ptr()),
+        )
     }
 
     fn get_approximate_size<'t>(&'t self) -> FdbFutureI64<'t> {
@@ -337,18 +318,18 @@ impl Transaction for FdbTransaction {
         })
     }
 
-    fn get_committed_version(&self) -> FdbResult<i64> {
+    unsafe fn get_committed_version(&self) -> FdbResult<i64> {
         let mut out_version = 0;
 
-        check(unsafe {
+        check(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
             // `Some<NonNull<...>>`.
             fdb_sys::fdb_transaction_get_committed_version(
                 (self.c_ptr.unwrap()).as_ptr(),
                 &mut out_version,
-            )
-        })
+            ),
+        )
         .map(|_| out_version)
     }
 
@@ -356,13 +337,13 @@ impl Transaction for FdbTransaction {
         self.fdb_database.clone()
     }
 
-    fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t> {
-        FdbFuture::new(unsafe {
+    unsafe fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t> {
+        FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
             // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_get_versionstamp((self.c_ptr.unwrap()).as_ptr())
-        })
+            fdb_sys::fdb_transaction_get_versionstamp((self.c_ptr.unwrap()).as_ptr()),
+        )
     }
 
     fn mutate(&self, optype: MutationType, key: Key, param: Bytes) {
@@ -389,13 +370,13 @@ impl Transaction for FdbTransaction {
         }
     }
 
-    fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
-        FdbFuture::new(unsafe {
+    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
+        FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
             // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_on_error((self.c_ptr.unwrap()).as_ptr(), e.code())
-        })
+            fdb_sys::fdb_transaction_on_error((self.c_ptr.unwrap()).as_ptr(), e.code()),
+        )
     }
 
     fn set(&self, key: Key, value: Value) {
@@ -544,7 +525,7 @@ impl ReadTransaction for ReadSnapshot {
         internal::read_transaction::set_option(self.c_ptr, option)
     }
 
-    fn set_read_version(&self, version: i64) {
+    unsafe fn set_read_version(&self, version: i64) {
         internal::read_transaction::set_read_version(self.c_ptr, version)
     }
 }
@@ -677,9 +658,7 @@ pub(super) mod internal {
 mod tests {
     use impls::impls;
 
-    use crate::transaction::{
-        ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
-    };
+    use crate::transaction::{ReadTransaction, Transaction};
 
     use super::{FdbTransaction, ReadSnapshot};
 
@@ -688,9 +667,7 @@ mod tests {
         #[rustfmt::skip]
         assert!(impls!(
 	    FdbTransaction:
-	        ReadTransactionContext &
 		ReadTransaction &
-		TransactionContext &
 		Transaction &
 		Drop &
 		!Copy &

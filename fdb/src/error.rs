@@ -83,6 +83,14 @@ impl FdbError {
     pub(crate) fn code(self) -> i32 {
         self.error_code
     }
+
+    /// Returns `true` if the error is from a layer. Returns `false`
+    /// if the error is a [C binding] error
+    ///
+    /// [C binding]: https://apple.github.io/foundationdb/api-error-codes.html
+    pub(crate) fn layer_error(e: i32) -> bool {
+        (100..=999).contains(&e)
+    }
 }
 
 /// Converts `fdb_error_t` to `FdbResult`

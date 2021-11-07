@@ -1,8 +1,10 @@
+use bytes::Bytes;
+
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use crate::database::{Database, DatabaseOption};
-use crate::error::{check, FdbResult};
+use crate::error::{check, FdbError, FdbResult};
 use crate::transaction::{
     FdbTransaction, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
 };
@@ -62,16 +64,23 @@ impl ReadTransactionContext for FdbDatabase {
         loop {
             let ret_val = f(&t);
 
-            // Closure returned an error. Check if its retryable.
+            // Closure returned an error
             if let Err(e) = ret_val {
-                if t.on_error(e).join().is_err() {
-                    return ret_val;
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
                 } else {
                     continue;
                 }
             }
 
-            // We don't need to commit read transaction, return `Ok(T)`
+            // We don't need to commit read transaction, return
+            // `Ok(T)`
             return ret_val;
         }
     }
@@ -89,19 +98,29 @@ impl TransactionContext for FdbDatabase {
         loop {
             let ret_val = f(&t);
 
-            // Closure returned an error. Check if its retryable.
+            // Closure returned an error.
             if let Err(e) = ret_val {
-                if t.on_error(e).join().is_err() {
-                    return ret_val;
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
                 } else {
                     continue;
                 }
             }
 
-            // Commit returned an error. Check if its retryable.
-            if let Err(e) = t.commit().join() {
-                if t.on_error(e).join().is_err() {
-                    return ret_val;
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { t.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
                 } else {
                     continue;
                 }
@@ -109,6 +128,110 @@ impl TransactionContext for FdbDatabase {
 
             // Commit successful, return `Ok(T)`
             return ret_val;
+        }
+    }
+
+    fn run_and_get_versionstamp<T, F>(&self, f: F) -> FdbResult<(T, Bytes)>
+    where
+        Self: Sized,
+        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
+    {
+        let t = self.create_transaction()?;
+        loop {
+            let ret_val = f(&t);
+
+            // Closure returned an error.
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Create a `get_versionstamp` FDB future. This future
+            // needs to be created before calling `commit`.
+            let vs_fut = unsafe { t.get_versionstamp() };
+
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { t.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Once the commit is successful, we will resolve the
+            // `vs_fut`.
+            return vs_fut
+                .join()
+                .map_err(|_| {
+                    // If `vs_fut` returns an error, after `commit`
+                    // was successful, we are in a gnarly
+                    // situation. Return `commit_unknown_result
+                    // (1021)` error.
+                    FdbError::new(1021)
+                })
+                .and_then(|k| ret_val.map(|x| -> (T, Bytes) { (x, k.into()) }));
+        }
+    }
+
+    fn run_and_get_transaction<T, F, Tr>(
+        &self,
+        f: F,
+    ) -> FdbResult<(T, Box<dyn Transaction<Database = Self::Database>>)>
+    where
+        Self: Sized,
+        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
+    {
+        let t = self.create_transaction()?;
+        loop {
+            let ret_val = f(&t);
+
+            // Closure returned an error.
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { t.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { t.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Commit successful, return
+            // `Ok((T, Box<dyn Transaction<Database = Self::Database>>)))`
+            return ret_val.map(
+                |x| -> (T, Box<dyn Transaction<Database = Self::Database>>) { (x, Box::new(t)) },
+            );
         }
     }
 }

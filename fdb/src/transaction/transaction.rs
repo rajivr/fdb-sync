@@ -38,7 +38,8 @@ use crate::{Key, Value};
 /// Keys and values in FDB are byte arrays. To encode other data
 /// types, see the [tuple layer] documentation.
 ///
-/// **Note**: All keys with fist byte `0xff` are reserved for internal use.
+/// **Note**: All keys with first byte `0xff` are reserved for
+/// internal use.
 ///
 /// [conflicts]: https://apple.github.io/foundationdb/developer-guide.html#developer-guide-transaction-conflicts
 /// [ACID]: https://apple.github.io/foundationdb/developer-guide.html#acid
@@ -51,6 +52,10 @@ use crate::{Key, Value};
 //       `TransactionContext` as a super trait causes rust to
 //       complain. Also `snapshot()` method is on `Transaction` trait
 //       instead of `ReadTransaction` trait.
+//
+//       Also both Java API and our API does not expose
+//       `fdb_transaction_reset`. For binding tester `RESET`, we will
+//       just drop the transaction.
 pub trait Transaction: ReadTransaction {
     /// [`Database`] associated with the [`Transaction`].
     type Database: Database;
@@ -72,7 +77,13 @@ pub trait Transaction: ReadTransaction {
     fn add_write_conflict_range(&self, range: Range) -> FdbResult<()>;
 
     /// Cancels the [`Transaction`].
-    fn cancel(&self);
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_cancel
+    unsafe fn cancel(&self);
 
     /// Clears a given key from the database.
     fn clear(&self, key: Key);
@@ -81,7 +92,13 @@ pub trait Transaction: ReadTransaction {
     fn clear_range(&self, range: Range);
 
     /// Commit this [`Transaction`].
-    fn commit<'t>(&'t self) -> FdbFutureUnit<'t>;
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_commit
+    unsafe fn commit<'t>(&'t self) -> FdbFutureUnit<'t>;
 
     /// Returns a future that will contain the approximated size of
     /// the commit, which is the summation of mutations, read conflict
@@ -90,7 +107,13 @@ pub trait Transaction: ReadTransaction {
 
     /// Gets the version number at which a successful commit modified
     /// the database.
-    fn get_committed_version(&self) -> FdbResult<i64>;
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_get_committed_version
+    unsafe fn get_committed_version(&self) -> FdbResult<i64>;
 
     /// Returns the [`Database`] that this [`Transaction`] is
     /// interacting with.
@@ -101,7 +124,13 @@ pub trait Transaction: ReadTransaction {
 
     /// Returns a future which will contain the versionstamp which was
     /// used by any versionstamp operations in this transaction.
-    fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t>;
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_get_versionstamp
+    unsafe fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t>;
 
     /// An atomic operation is a single database command that carries
     /// out several logical steps: reading the value of a key,
@@ -115,9 +144,17 @@ pub trait Transaction: ReadTransaction {
     /// errors.
     ///
     /// Typical code will not used this method directly. It is used by
-    /// `run` and `read` methods when they need to implement correct retry
-    /// loop.
-    fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t>;
+    /// [`run`] and [`read`] methods when they need to implement
+    /// correct retry loop.
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [`run`]: crate::transaction::TransactionContext::run
+    /// [`read`]: crate::transaction::ReadTransactionContext::read
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_on_error
+    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t>;
 
     /// Sets the value for a given key.
     fn set(&self, key: Key, value: Value);

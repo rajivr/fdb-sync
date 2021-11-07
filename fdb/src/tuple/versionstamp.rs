@@ -49,35 +49,63 @@ const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 /// Example usage might be to do something like the following:
 ///
 /// ```ignore
-/// let vs = fdb_database
-///     .run(|tr| {
+/// let (_, tr_version) = fdb_database
+///     .run_and_get_versionstamp(|tr| {
 ///         let mut t = Tuple::new();
+///         t.add_string("prefix".to_string());
 ///         t.add_versionstamp(Versionstamp::incomplete(0));
 ///         tr.mutate(
 ///             MutationType::SetVersionstampedKey,
-///             (t.pack_with_versionstamp(Bytes::from_static(&b"prefix"[..])))
-///                 .unwrap()
-///                 .into(),
+///             t.pack_with_versionstamp(Bytes::new())?.into(),
 ///             Bytes::new(),
 ///         );
 ///
-///	    let vs_fut = tr.get_versionstamp();
+///         Ok(())
+///     })
+///     .unwrap_or_else(|err| {
+///         panic!(
+///             "Error occurred during `run_and_get_versionstamp`: {:?}",
+///             err
+///         )
+///     });
 ///
-///         tr.commit().join()?;
+/// let vs = fdb_database
+///     .run(|tr| {
+///         let subspace = Subspace::new(Bytes::new()).subspace(&{
+///             let mut t = Tuple::new();
+///             t.add_string("prefix".to_string());
+///             t
+///         });
 ///
-///	    let vs = vs_fut.join()?;
+///         let subspace_range = subspace.range(&Tuple::new());
 ///
-///	    Ok(vs)
+///         let key = tr
+///             .get_range(
+///                 KeySelector::first_greater_or_equal(subspace_range.begin().clone().into()),
+///                 KeySelector::first_greater_or_equal(subspace_range.end().clone().into()),
+///                 RangeOptions::default(),
+///             )
+///             .into_iter()
+///             .next()
+///             .unwrap()?
+///             .get_key()
+///             .clone()
+///             .into();
+///
+///         Ok(subspace.unpack(&key)?.get_versionstamp_ref(0)?.clone())
 ///     })
 ///     .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
 ///
-/// println!("10 byte fdb_c level versionstamp: {:?}", vs);
+/// assert_eq!(vs, Versionstamp::complete(tr_version, 0));
 /// ```
 ///
 /// Here, an incomplete [`Versionstamp`] is packed and written to the
 /// database with [`SetVersionstampedKey`] mutation type.
 ///
-/// TODO: Complete this documentation after subspace layer is complete.
+/// After committing, we then attempt to read back the same key that
+/// we just wrote. Then we verify the invariant that the deserialized
+/// [`Versionstamp`] is the same as a complete [`Versionstamp`] value
+/// created from the first transaction's version information.
 ///
 /// [`Tuple`]: crate::tuple::Tuple
 /// [`get_versionstamp`]: crate::transaction::Transaction::get_versionstamp
