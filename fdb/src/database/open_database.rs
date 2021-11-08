@@ -9,10 +9,14 @@ use crate::error::{check, FdbError, FdbResult, DATABASE_OPEN};
 /// Returns [`Database`] handle to the FDB cluster identified by the
 /// provided cluster file.
 ///
+/// If no cluster file is passed, FDB automatically [determines a
+/// cluster file] with which to connect to a cluster.
+///
 /// A single client can use this function multiple times to connect to
 /// different clusters simultaneously, with each invocation requiring
 /// its own cluster file.
 ///
+/// [determines a cluster file]: https://apple.github.io/foundationdb/administration.html#specifying-a-cluster-file
 /// [`Database`]: crate::database::Database
 pub fn open_database<P>(cluster_file_path: P) -> FdbResult<FdbDatabase>
 where

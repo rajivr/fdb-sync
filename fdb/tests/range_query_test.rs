@@ -26,9 +26,8 @@ extern "C" fn stop_network() {
 }
 
 fn get_database() -> FdbDatabase {
-    let fdb_cluster_file_path =
-        env::var("FDB_CLUSTER_FILE_PATH").expect("FDB_CLUSTER_FILE_PATH not defined!");
-    fdb::open_database(fdb_cluster_file_path).unwrap()
+    let fdb_cluster_file = env::var("FDB_CLUSTER_FILE").expect("FDB_CLUSTER_FILE not defined!");
+    fdb::open_database(fdb_cluster_file).unwrap()
 }
 
 fn clear_database(fdb_database: &FdbDatabase) {

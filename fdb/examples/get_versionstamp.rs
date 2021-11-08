@@ -8,15 +8,14 @@ use fdb::KeySelector;
 use std::env;
 
 fn main() {
-    let fdb_cluster_file_path =
-        env::var("FDB_CLUSTER_FILE_PATH").expect("FDB_CLUSTER_FILE_PATH not defined!");
+    let fdb_cluster_file = env::var("FDB_CLUSTER_FILE").expect("FDB_CLUSTER_FILE not defined!");
 
     unsafe {
         fdb::select_api_version(fdb_sys::FDB_API_VERSION as i32);
         fdb::start_network();
     }
 
-    let fdb_database = fdb::open_database(fdb_cluster_file_path).unwrap();
+    let fdb_database = fdb::open_database(fdb_cluster_file).unwrap();
 
     let (_, tr_version) = fdb_database
         .run_and_get_versionstamp(|tr| {
