@@ -31,6 +31,9 @@ pub mod subspace;
 pub mod transaction;
 pub mod tuple;
 
+/// Maximum API version supported by the client
+pub use fdb_sys::FDB_API_VERSION;
+
 pub use crate::fdb::{
     select_api_version, set_network_option, start_network, stop_network, Key, KeySelector,
     KeyValue, Value,

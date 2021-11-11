@@ -12,7 +12,7 @@ static INIT: Once = Once::new();
 fn ensure_network_started() {
     unsafe {
         INIT.call_once(|| {
-            fdb::select_api_version(fdb_sys::FDB_API_VERSION as i32);
+            fdb::select_api_version(fdb::FDB_API_VERSION as i32);
             fdb::start_network();
             libc::atexit(stop_network);
         });

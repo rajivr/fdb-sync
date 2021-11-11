@@ -8,7 +8,7 @@ fn main() {
     let fdb_cluster_file = env::var("FDB_CLUSTER_FILE").expect("FDB_CLUSTER_FILE not defined!");
 
     unsafe {
-        fdb::select_api_version(fdb_sys::FDB_API_VERSION as i32);
+        fdb::select_api_version(fdb::FDB_API_VERSION as i32);
         fdb::start_network();
     }
 

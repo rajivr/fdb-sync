@@ -1,6 +1,9 @@
 //! Provides [`FdbError`] type, [`FdbResult`] type alias and error
 //! constants.
 
+use std::error::Error;
+use std::fmt::{self, Display};
+
 /// Error type for this crate.
 ///
 /// Internally it wraps FDB [Error Codes]. Error codes from 100 thru'
@@ -90,6 +93,14 @@ impl FdbError {
     /// [C binding]: https://apple.github.io/foundationdb/api-error-codes.html
     pub(crate) fn layer_error(e: i32) -> bool {
         (100..=999).contains(&e)
+    }
+}
+
+impl Error for FdbError {}
+
+impl Display for FdbError {
+    fn fmt<'a>(&self, f: &mut fmt::Formatter<'a>) -> fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

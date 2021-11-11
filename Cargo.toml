@@ -2,5 +2,6 @@
 members = [
     "fdb",
     "fdb-gen",
+    "fdb-stacktester",
     "fdb-sys"
 ]
