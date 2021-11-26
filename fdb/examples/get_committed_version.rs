@@ -24,6 +24,8 @@ fn main() {
         tr.get_committed_version()
     });
 
+    drop(fdb_database);
+
     unsafe {
         fdb::stop_network();
     }

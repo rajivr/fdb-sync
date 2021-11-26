@@ -12,7 +12,10 @@ use crate::error::{
 use crate::future::{FdbFuture, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
 use crate::option::ConflictRangeType;
 use crate::range::{fdb_transaction_get_range, Range, RangeOptions, RangeResult};
-use crate::transaction::{MutationType, ReadTransaction, Transaction, TransactionOption};
+use crate::transaction::{
+    MutationType, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
+    TransactionOption,
+};
 use crate::{Key, KeySelector, Value};
 
 /// A handle to a FDB transaction.
@@ -38,6 +41,27 @@ pub struct FdbTransaction {
 }
 
 impl FdbTransaction {
+    /// Consumes the [`FdbTransaction`], returning a wrapped raw
+    /// pointer. The pointer is wrapped using [`Box`].
+    ///
+    /// # Note
+    ///
+    /// You should not use this API. This API exists to support
+    /// binding tester.
+    pub fn into_raw(t: FdbTransaction) -> *mut FdbTransaction {
+        Box::into_raw(Box::new(t))
+    }
+
+    /// Constructs a boxed [`FdbTransaction`] from a raw pointer.
+    ///
+    /// # Note
+    ///
+    /// You should not use this API. This API exists to support
+    /// binding tester.
+    pub unsafe fn from_raw(raw: *mut FdbTransaction) -> Box<FdbTransaction> {
+        Box::from_raw(raw)
+    }
+
     pub(crate) fn new(
         c_ptr: NonNull<fdb_sys::FDBTransaction>,
         fdb_database: FdbDatabase,
@@ -61,6 +85,37 @@ impl Drop for FdbTransaction {
         self.c_ptr.take().map(|x| unsafe {
             fdb_sys::fdb_transaction_destroy(x.as_ptr());
         });
+    }
+}
+
+impl ReadTransactionContext for FdbTransaction {
+    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    where
+        Self: Sized,
+        F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(self);
+
+            // Closure returned an error
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // We don't need to commit read transaction, return
+            // `Ok(T)`
+            return ret_val;
+        }
     }
 }
 
@@ -156,7 +211,7 @@ impl ReadTransaction for FdbTransaction {
         )
     }
 
-    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
+    unsafe fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -165,6 +220,15 @@ impl ReadTransaction for FdbTransaction {
 
     fn is_snapshot(&self) -> bool {
         false
+    }
+
+    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
+        FdbFuture::new(
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_on_error((self.c_ptr.unwrap()).as_ptr(), e.code()),
+        )
     }
 
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
@@ -179,6 +243,153 @@ impl ReadTransaction for FdbTransaction {
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
         internal::read_transaction::set_read_version((self.c_ptr.unwrap()).as_ptr(), version)
+    }
+}
+
+impl TransactionContext for FdbTransaction {
+    type Database = FdbDatabase;
+
+    fn run<T, F>(&self, f: F) -> FdbResult<T>
+    where
+        Self: Sized,
+        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(self);
+
+            // Closure returned an error.
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { self.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Commit successful, return `Ok(T)`
+            return ret_val;
+        }
+    }
+
+    fn run_and_get_versionstamp<T, F>(&self, f: F) -> FdbResult<(T, Bytes)>
+    where
+        Self: Sized,
+        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(self);
+
+            // Closure returned an error.
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Create a `get_versionstamp` FDB future. This future
+            // needs to be created before calling `commit`.
+            let vs_fut = unsafe { self.get_versionstamp() };
+
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { self.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Once the commit is successful, we will resolve the
+            // `vs_fut`.
+            return vs_fut
+                .join()
+                .map_err(|_| {
+                    // If `vs_fut` returns an error, after `commit`
+                    // was successful, we are in a gnarly
+                    // situation. Return `commit_unknown_result
+                    // (1021)` error.
+                    FdbError::new(1021)
+                })
+                .and_then(|k| ret_val.map(|x| -> (T, Bytes) { (x, k.into()) }));
+        }
+    }
+
+    fn run_and_get_transaction<T, F, Tr>(
+        self,
+        f: F,
+    ) -> FdbResult<(T, Box<dyn Transaction<Database = Self::Database>>)>
+    where
+        Self: Sized,
+        F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(&self);
+
+            // Closure returned an error.
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // No error from closure. Attempt to commit the
+            // transaction.
+            if let Err(e) = unsafe { self.commit() }.join() {
+                // Commit returned an error
+                if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // Commit successful, return
+            // `Ok((T, Box<dyn Transaction<Database = Self::Database>>)))`
+            return ret_val.map(
+                |x| -> (T, Box<dyn Transaction<Database = Self::Database>>) { (x, Box::new(self)) },
+            );
+        }
     }
 }
 
@@ -370,13 +581,11 @@ impl Transaction for FdbTransaction {
         }
     }
 
-    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
-        FdbFuture::new(
-            // Safety: It is safe to unwrap here because if we have a
-            // `self: &FdbTransaction`, then `c_ptr` *must* be
-            // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_on_error((self.c_ptr.unwrap()).as_ptr(), e.code()),
-        )
+    unsafe fn reset(&self) {
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        fdb_sys::fdb_transaction_reset((self.c_ptr.unwrap()).as_ptr());
     }
 
     fn set(&self, key: Key, value: Value) {
@@ -456,6 +665,37 @@ struct ReadSnapshot {
     c_ptr: *mut fdb_sys::FDBTransaction,
 }
 
+impl ReadTransactionContext for ReadSnapshot {
+    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    where
+        Self: Sized,
+        F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(self);
+
+            // Closure returned an error
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // We don't need to commit read transaction, return
+            // `Ok(T)`
+            return ret_val;
+        }
+    }
+}
+
 impl ReadTransaction for ReadSnapshot {
     fn add_read_conflict_key_if_not_snapshot(&self, _key: Key) -> FdbResult<()> {
         // return error, as this is a snapshot
@@ -513,12 +753,21 @@ impl ReadTransaction for ReadSnapshot {
         )
     }
 
-    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
+    unsafe fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
         internal::read_transaction::get_read_version(self.c_ptr)
     }
 
     fn is_snapshot(&self) -> bool {
         true
+    }
+
+    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
+        FdbFuture::new(
+            // Safety: It is safe to unwrap here because if we have a
+            // `self: &FdbTransaction`, then `c_ptr` *must* be
+            // `Some<NonNull<...>>`.
+            fdb_sys::fdb_transaction_on_error(self.c_ptr, e.code()),
+        )
     }
 
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
@@ -658,7 +907,9 @@ pub(super) mod internal {
 mod tests {
     use impls::impls;
 
-    use crate::transaction::{ReadTransaction, Transaction};
+    use crate::transaction::{
+        ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
+    };
 
     use super::{FdbTransaction, ReadSnapshot};
 
@@ -668,7 +919,9 @@ mod tests {
         assert!(impls!(
 	    FdbTransaction:
 		ReadTransaction &
+		ReadTransactionContext &
 		Transaction &
+		TransactionContext &
 		Drop &
 		!Copy &
 		!Clone &
@@ -679,6 +932,7 @@ mod tests {
         assert!(impls!(
 	    ReadSnapshot:
 	        ReadTransaction &
+	        ReadTransactionContext &
 		!Drop &
 		!Copy &
 		!Clone &

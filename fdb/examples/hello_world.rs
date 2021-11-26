@@ -20,7 +20,7 @@ fn main() {
         .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
 
     let ret = fdb_database
-        .read(|tr| tr.get(Bytes::from("hello").into()).join())
+        .read(|tr| Ok(tr.get(Bytes::from("hello").into()).join()?))
         .unwrap_or_else(|err| panic!("Error occured during `read`: {:?}", err))
         .expect("Key not found");
 
@@ -30,7 +30,7 @@ fn main() {
     );
 
     let ret = fdb_database
-        .run(|tr| tr.snapshot().get(Bytes::from("hello").into()).join())
+        .run(|tr| Ok(tr.snapshot().get(Bytes::from("hello").into()).join()?))
         .unwrap_or_else(|err| panic!("Error occured during `run`: {:?}", err))
         .expect("Key not found");
 
@@ -38,6 +38,8 @@ fn main() {
         "snapshot get: hello, {}",
         String::from_utf8_lossy(&Bytes::from(ret)[..])
     );
+
+    drop(fdb_database);
 
     unsafe {
         fdb::stop_network();

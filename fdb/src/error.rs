@@ -11,6 +11,8 @@ use std::fmt::{self, Display};
 ///
 /// [Error Codes]: https://apple.github.io/foundationdb/api-error-codes.html
 //
+// NOTE: 0 cannot be used for `error_code`.
+//
 // 100 - `database` module
 // 110 - `transaction` module
 // 120 - `tuple` module
@@ -54,6 +56,12 @@ pub const TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND: i32 = 122;
 /// [`Versionstamp`]: crate::tuple::Versionstamp
 pub const TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND: i32 = 123;
 
+/// Error occurred when calling [`strinc`], as the `prefix` supplied
+/// is either empty or contains only `0xFF`.
+///
+/// [`strinc`]: crate::tuple::bytes_util::strinc
+pub const TUPLE_BYTES_UTIL_STRINC_ERROR: i32 = 124;
+
 /// Error occured when trying to pack [`Subspace`] containing an
 /// incomplete [`Versionstamp`]. Prefix contains an incomplete
 /// [`Versionstamp`], which is not allowed.
@@ -75,15 +83,21 @@ pub const SUBSPACE_UNPACK_KEY_MISMATCH: i32 = 131;
 pub type FdbResult<T> = Result<T, FdbError>;
 
 impl FdbError {
-    /// Create new `FdbError`
-    pub(crate) fn new(err: fdb_sys::fdb_error_t) -> FdbError {
+    /// Create new [`FdbError`]
+    ///
+    /// # Note
+    ///
+    /// You should not need to use this API. It is exposed publicly
+    /// because we need to use it in binding tester. Otherwise, it is
+    /// an internal API for this crate.
+    pub fn new(err: fdb_sys::fdb_error_t) -> FdbError {
         FdbError {
             error_code: err as i32,
         }
     }
 
-    /// Returns raw FDB error code (`fdb_error_t`)
-    pub(crate) fn code(self) -> i32 {
+    /// Returns raw FDB error code
+    pub fn code(self) -> i32 {
         self.error_code
     }
 

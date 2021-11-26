@@ -9,6 +9,7 @@ use std::mem;
 use crate::error::{FdbError, FdbResult};
 use crate::future::{FdbFuture, FdbFutureKeyValueArray};
 use crate::transaction::ReadTransaction;
+use crate::tuple::bytes_util;
 use crate::{Key, KeySelector, KeyValue};
 
 pub use crate::option::StreamingMode;
@@ -28,6 +29,24 @@ impl Range {
     /// exclusive end key.
     pub fn new(begin: Key, end: Key) -> Range {
         Range { begin, end }
+    }
+
+    /// Return a [`Range`] that describes all possible keys that are
+    /// prefixed with the specified key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the supplied [`Key`] is empty or contains only
+    /// `0xFF` bytes.
+    pub fn starts_with(prefix_key: Key) -> Range {
+        Range::new(
+            prefix_key.clone(),
+            bytes_util::strinc(Bytes::from(prefix_key))
+                .unwrap_or_else(|err| {
+                    panic!("Error occurred during `bytes_util::strinc`: {:?}", err)
+                })
+                .into(),
+        )
     }
 
     /// Return the beginning of the range.
@@ -139,7 +158,8 @@ impl Default for RangeOptions {
 /// A handle to the result of a range read.
 ///
 /// [`RangeResult`] implements [`IntoIterator`] trait which can be
-/// used to get an [`Iterator`] that yields a `FdbResult<KeyValue>>`.
+/// used to get an [`Iterator`] that yields a
+/// [`FdbResult`]`<`[`KeyValue`]`>`.
 //
 #[derive(Debug)]
 pub struct RangeResult<'t> {
@@ -261,6 +281,7 @@ enum RangeResultIterStateData<'t> {
     Done,
 }
 
+#[derive(Debug)]
 enum RangeResultIterEvent<'t> {
     FetchOk {
         kv_list: Vec<KeyValue>,
@@ -306,23 +327,28 @@ impl<'t> RangeResultIter<'t> {
                 RangeResultIterEvent::FetchOk { kv_list, more } => {
                     // transition action
 
-                    // for the next iteration reduce the limit by the
-                    // length of the returned key-value array.
-                    if let Some(limit) = self.limit.as_mut() {
-                        let len: i32 = kv_list.len().try_into().unwrap();
-                        *limit = *limit - len;
-                    }
+                    // `FetchOk` event might return an empty list, in
+                    // which case we can't set options for the next
+                    // iteration.
+                    if kv_list.len() != 0 {
+                        // for the next iteration reduce the limit by the
+                        // length of the returned key-value array.
+                        if let Some(limit) = self.limit.as_mut() {
+                            let len: i32 = kv_list.len().try_into().unwrap();
+                            *limit = *limit - len;
+                        }
 
-                    self.iteration += 1;
+                        self.iteration += 1;
 
-                    if self.options_reverse {
-                        self.end = KeySelector::first_greater_or_equal(
-                            kv_list[kv_list.len() - 1].get_key().clone(),
-                        );
-                    } else {
-                        self.begin = KeySelector::first_greater_than(
-                            kv_list[kv_list.len() - 1].get_key().clone(),
-                        );
+                        if self.options_reverse {
+                            self.end = KeySelector::first_greater_or_equal(
+                                kv_list[kv_list.len() - 1].get_key().clone(),
+                            );
+                        } else {
+                            self.begin = KeySelector::first_greater_than(
+                                kv_list[kv_list.len() - 1].get_key().clone(),
+                            );
+                        }
                     }
 
                     self.range_result_iter_state_data =

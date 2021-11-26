@@ -6,7 +6,9 @@ fn main() {
 
     // Default cluster file specified by environment variable
     // FDB_CLUSTER_FILE is opened.
-    let _fdb_database = fdb::open_database("").unwrap();
+    let fdb_database = fdb::open_database("").unwrap();
+
+    drop(fdb_database);
 
     unsafe {
         fdb::stop_network();

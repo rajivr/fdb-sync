@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::database::Database;
-use crate::error::{FdbError, FdbResult};
+use crate::error::FdbResult;
 use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureUnit};
 use crate::range::Range;
 use crate::transaction::{MutationType, ReadTransaction};
@@ -52,10 +52,6 @@ use crate::{Key, Value};
 //       `TransactionContext` as a super trait causes rust to
 //       complain. Also `snapshot()` method is on `Transaction` trait
 //       instead of `ReadTransaction` trait.
-//
-//       Also both Java API and our API does not expose
-//       `fdb_transaction_reset`. For binding tester `RESET`, we will
-//       just drop the transaction.
 pub trait Transaction: ReadTransaction {
     /// [`Database`] associated with the [`Transaction`].
     type Database: Database;
@@ -138,23 +134,14 @@ pub trait Transaction: ReadTransaction {
     /// result.
     fn mutate(&self, optype: MutationType, key: Key, param: Bytes);
 
-    /// Determines whether an error returned by a [`Transaction`]
-    /// method is retryable. Waiting on the returned future will
-    /// return the same error when fatal, or return `()` for retryable
-    /// errors.
-    ///
-    /// Typical code will not used this method directly. It is used by
-    /// [`run`] and [`read`] methods when they need to implement
-    /// correct retry loop.
+    /// Reset the [`Transaction`].
     ///
     /// # Safety
     ///
     /// See [C API] for more details.
     ///
-    /// [`run`]: crate::transaction::TransactionContext::run
-    /// [`read`]: crate::transaction::ReadTransactionContext::read
-    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_on_error
-    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t>;
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_reset
+    unsafe fn reset(&self);
 
     /// Sets the value for a given key.
     fn set(&self, key: Key, value: Value);
@@ -166,9 +153,9 @@ pub trait Transaction: ReadTransaction {
     /// reasoning about concurrency harder.
     ///
     /// For more information about how to use snapshot reads
-    /// correctly, see [`snapshot reads`].
+    /// correctly, see [snapshot reads].
     ///
-    /// [`snapshot reads`]: https://apple.github.io/foundationdb/developer-guide.html#snapshot-reads
+    /// [snapshot reads]: https://apple.github.io/foundationdb/developer-guide.html#snapshot-reads
     fn snapshot(&self) -> &dyn ReadTransaction;
 
     /// Creates a watch that will become ready when it reports a

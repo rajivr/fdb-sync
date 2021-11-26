@@ -188,7 +188,7 @@ impl TransactionContext for FdbDatabase {
     }
 
     fn run_and_get_transaction<T, F, Tr>(
-        &self,
+        self,
         f: F,
     ) -> FdbResult<(T, Box<dyn Transaction<Database = Self::Database>>)>
     where

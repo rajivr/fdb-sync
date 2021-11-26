@@ -66,6 +66,8 @@ fn main() {
 
     assert_eq!(vs, Versionstamp::complete(tr_version, 0));
 
+    drop(fdb_database);
+
     unsafe {
         fdb::stop_network();
     }

@@ -11,5 +11,7 @@ mod element;
 mod tuple;
 mod versionstamp;
 
+pub mod bytes_util;
+
 pub use tuple::Tuple;
 pub use versionstamp::Versionstamp;

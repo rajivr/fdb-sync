@@ -1,7 +1,7 @@
-use crate::error::FdbResult;
-use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue};
+use crate::error::{FdbError, FdbResult};
+use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
 use crate::range::{Range, RangeOptions, RangeResult};
-use crate::transaction::TransactionOption;
+use crate::transaction::{ReadTransactionContext, TransactionOption};
 use crate::{Key, KeySelector};
 
 /// A read-only subset of a FDB [`Transaction`].
@@ -70,12 +70,42 @@ pub trait ReadTransaction {
     /// Gets the version at which the reads for this [`Transaction`]
     /// will access the database.
     ///
+    /// # Safety
+    ///
+    /// The [`FdbFuture`] resolves to an [`i64`] instead of a [`u64`]
+    /// because of [internal representation]. Even though it is an
+    /// [`i64`], the future will always return a positive
+    /// number. Negative GRV numbers are used internally within FDB.
+    ///
+    /// You only rely on GRV only for read-only transactions. For
+    /// read-write transactions you should use commit version.
+    ///
     /// [`Transaction`]: crate::transaction::Transaction
-    fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t>;
+    /// [`FdbFuture`]: crate::future::FdbFuture
+    /// [internal representation]: https://github.com/apple/foundationdb/blob/6.3.22/fdbclient/FDBTypes.h#L32
+    unsafe fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t>;
 
     /// Gets whether this transaction is a snapshot view of the
     /// database.
     fn is_snapshot(&self) -> bool;
+
+    /// Determines whether an error returned by a [`Transaction`]
+    /// method is retryable. Waiting on the returned future will
+    /// return the same error when fatal, or return `()` for retryable
+    /// errors.
+    ///
+    /// Typical code will not used this method directly. It is used by
+    /// [`run`] and [`read`] methods when they need to implement
+    /// correct retry loop.
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [`run`]: crate::transaction::TransactionContext::run
+    /// [`read`]: crate::transaction::ReadTransactionContext::read
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_on_error
+    unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t>;
 
     /// Set options on a [`Transaction`].
     ///
@@ -91,4 +121,52 @@ pub trait ReadTransaction {
     ///
     /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_set_read_version
     unsafe fn set_read_version(&self, version: i64);
+}
+
+impl ReadTransactionContext for &dyn ReadTransaction {
+    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    where
+        Self: Sized,
+        F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
+    {
+        loop {
+            let ret_val = f(*self);
+
+            // Closure returned an error
+            if let Err(e) = ret_val {
+                if FdbError::layer_error(e.code()) {
+                    // Check if it is a layer error. If so, just
+                    // return it.
+                    return Err(e);
+                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
+                    // Check if `on_error` returned an error. This
+                    // means we have a non-retryable error.
+                    return Err(e1);
+                } else {
+                    continue;
+                }
+            }
+
+            // We don't need to commit read transaction, return
+            // `Ok(T)`
+            return ret_val;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use impls::impls;
+
+    use crate::transaction::ReadTransactionContext;
+
+    use super::ReadTransaction;
+
+    #[test]
+    fn impls() {
+        #[rustfmt::skip]
+        assert!(impls!(
+	    &dyn ReadTransaction:
+                ReadTransactionContext));
+    }
 }

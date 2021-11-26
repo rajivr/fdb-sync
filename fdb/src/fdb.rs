@@ -85,6 +85,15 @@ pub struct KeySelector {
 }
 
 impl KeySelector {
+    /// Create a new [`KeySelector`] from the given parameters.
+    pub fn new(key: Key, or_equal: bool, offset: i32) -> KeySelector {
+        KeySelector {
+            key,
+            or_equal,
+            offset,
+        }
+    }
+
     /// Returns a new [`KeySelector`] offset by a given number of keys
     /// from this one.
     pub fn add(self, offset: i32) -> KeySelector {
@@ -127,14 +136,6 @@ impl KeySelector {
 
     pub(crate) fn or_equal(&self) -> bool {
         self.or_equal
-    }
-
-    fn new(key: Key, or_equal: bool, offset: i32) -> KeySelector {
-        KeySelector {
-            key,
-            or_equal,
-            offset,
-        }
     }
 }
 

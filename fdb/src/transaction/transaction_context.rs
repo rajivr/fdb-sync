@@ -45,7 +45,7 @@ pub trait TransactionContext: ReadTransactionContext {
     // because within traits we cannot do
     // `impl Transaction<Database = Self::Database>>`
     fn run_and_get_transaction<T, F, Tr>(
-        &self,
+        self,
         f: F,
     ) -> FdbResult<(T, Box<dyn Transaction<Database = Self::Database>>)>
     where

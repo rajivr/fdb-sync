@@ -81,6 +81,8 @@ fn main() {
         })
         .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
 
+    drop(fdb_database);
+
     unsafe {
         fdb::stop_network();
     }

@@ -54,6 +54,28 @@ where
             FdbFutureGet::get(fut_c_ptr)
         }
     }
+
+    /// Consumes the [`FdbFuture`], returning a wrapped raw
+    /// pointer. The pointer is wrapped using [`Box`].
+    ///
+    /// # Note
+    ///
+    /// You should not use this API. This API exists to support
+    /// binding tester.
+    pub fn into_raw(t: FdbFuture<'t, T>) -> *mut T {
+        Box::into_raw(Box::new(t)) as *mut T
+    }
+
+    /// Constructs a boxed [`FdbFuture`] from a raw pointer. `'t` has
+    /// unbounded lifetime.
+    ///
+    /// # Note
+    ///
+    /// You should not use this API. This API exists to support
+    /// binding tester.
+    pub unsafe fn from_raw(raw: *mut T) -> Box<FdbFuture<'t, T>> {
+        Box::from_raw(raw as *mut FdbFuture<'t, T>)
+    }
 }
 
 impl<'t, T> Drop for FdbFuture<'t, T> {
@@ -64,9 +86,11 @@ impl<'t, T> Drop for FdbFuture<'t, T> {
     }
 }
 
-/// Extracts value that are owned by [`FdbFuture`]
+/// Extracts value that are owned by [`FdbFuture`].
 ///
-/// In most cases you will not directly use this trait. It is used by
+/// # Note
+///
+/// You will not directly use this trait. It is used by
 /// [`FdbFuture::join`] method.
 pub trait FdbFutureGet {
     /// Extract value that are owned by [`FdbFuture`]
