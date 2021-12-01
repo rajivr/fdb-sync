@@ -478,10 +478,6 @@ class ApiTest(Test):
                         instructions.push_args('SET_VERSIONSTAMPED_VALUE', version_value_key_2, versionstamped_value)
                         instructions.append('ATOMIC_OP')
 
-                    version_value_key = self.versionstamped_values.pack((rand_str,))
-                    instructions.push_args('SET_VERSIONSTAMPED_VALUE', version_value_key,
-                                           self.versionstamp_value(fdb.tuple.Versionstamp._UNSET_TR_VERSION + fdb.tuple.pack(tup)))
-                    instructions.append('ATOMIC_OP')
                     self.can_use_key_selectors = False
 
             elif op == 'TUPLE_UNPACK':

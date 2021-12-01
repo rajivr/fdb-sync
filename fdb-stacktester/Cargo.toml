@@ -12,6 +12,7 @@ bytes = "1"
 dashmap = "4"
 fdb = { version = "0.1.0", path = "../fdb", default-features = false }
 fdb-sys = { version = "0.1.0", path = "../fdb-sys", default-features = false }
+itertools = "0.10.0"
 num-bigint = "0.4"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "0.8", features = ["v4"] }

@@ -557,7 +557,7 @@ impl Transaction for FdbTransaction {
         )
     }
 
-    fn mutate(&self, optype: MutationType, key: Key, param: Bytes) {
+    unsafe fn mutate(&self, optype: MutationType, key: Key, param: Bytes) {
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -566,19 +566,17 @@ impl Transaction for FdbTransaction {
         let param = p.as_ref().as_ptr();
         let param_length = p.as_ref().len().try_into().unwrap();
 
-        unsafe {
-            // Safety: It is safe to unwrap here because if we have a
-            // `self: &FdbTransaction`, then `c_ptr` *must* be
-            // `Some<NonNull<...>>`.
-            fdb_sys::fdb_transaction_atomic_op(
-                (self.c_ptr.unwrap()).as_ptr(),
-                key_name,
-                key_name_length,
-                param,
-                param_length,
-                optype.code(),
-            );
-        }
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        fdb_sys::fdb_transaction_atomic_op(
+            (self.c_ptr.unwrap()).as_ptr(),
+            key_name,
+            key_name_length,
+            param,
+            param_length,
+            optype.code(),
+        );
     }
 
     unsafe fn reset(&self) {

@@ -1,14 +1,18 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use dashmap::DashMap;
 
 use fdb::database::{Database, FdbDatabase};
-use fdb::error::{FdbError, FdbResult};
+use fdb::error::{
+    FdbError, FdbResult, TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND,
+    TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND,
+};
 use fdb::future::{FdbFuture, FdbFutureGet};
 use fdb::range::{Range, RangeOptions, StreamingMode};
 use fdb::subspace::Subspace;
 use fdb::transaction::{
-    FdbTransaction, ReadTransaction, ReadTransactionContext, Transaction, TransactionContext,
+    FdbTransaction, MutationType, ReadTransaction, ReadTransactionContext, Transaction,
+    TransactionContext,
 };
 use fdb::tuple::{bytes_util, Tuple, Versionstamp};
 use fdb::{self, Key, KeySelector, Value};
@@ -23,6 +27,8 @@ use fdb_sys::{
     FDBStreamingMode_FDB_STREAMING_MODE_WANT_ALL,
 };
 
+use itertools::Itertools;
+
 use num_bigint::BigInt;
 
 use tokio::runtime::{Handle, Runtime};
@@ -35,10 +41,14 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
 use std::error::Error;
+use std::iter;
 use std::mem;
+use std::ops::Range as OpsRange;
 use std::sync::Arc;
 
 const VERBOSE: bool = false;
+const VERBOSE_INST_RANGE: Option<OpsRange<usize>> = None;
+const VERBOSE_INST_ONLY: bool = false;
 
 #[derive(Debug)]
 struct FdbTransactionPtrWrapper {
@@ -267,6 +277,31 @@ impl StackMachine {
             FDBStreamingMode_FDB_STREAMING_MODE_LARGE => StreamingMode::Large,
             FDBStreamingMode_FDB_STREAMING_MODE_SERIAL => StreamingMode::Serial,
             _ => panic!("Invalid streaming mode code provided {:?}", code),
+        }
+    }
+
+    // This is used for `ATOMIC_OP(_DATABASE)` operation. The `OPTYPE`
+    // is pushed on the stack as a string. The list of `OPTYPE`s that
+    // is pushed onto the stack maintained here [1] in `atomic_ops`
+    // variable. If new `OPTYPE`s are added in future, then we'll need
+    // to update this method.
+    //
+    // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/tests/api.py#L177
+    fn from_mutation_type_string(s: String) -> MutationType {
+        match s.as_str() {
+            "BIT_AND" => MutationType::BitAnd,
+            "BIT_OR" => MutationType::BitOr,
+            "MAX" => MutationType::Max,
+            "MIN" => MutationType::Min,
+            "BYTE_MIN" => MutationType::ByteMin,
+            "BYTE_MAX" => MutationType::ByteMax,
+            "ADD" => MutationType::Add,
+            "BIT_XOR" => MutationType::BitXor,
+            "APPEND_IF_FITS" => MutationType::AppendIfFits,
+            "SET_VERSIONSTAMPED_KEY" => MutationType::SetVersionstampedKey,
+            "SET_VERSIONSTAMPED_VALUE" => MutationType::SetVersionstampedValue,
+            "COMPARE_AND_CLEAR" => MutationType::CompareAndClear,
+            _ => panic!("Invalid mutation type string provided: {:?}", s),
         }
     }
 
@@ -518,19 +553,32 @@ impl StackMachine {
     // second mutation (for example another `SET` operation) would
     // fail with error code 2017 (Operation issued while a commit was
     // outstanding).
+    //
+    // It is also possible that `run` might fail, in which case we
+    // push an error onto the stack.
     fn execute_mutation<'transaction, T, F>(&mut self, f: F, is_database: bool, inst_number: usize)
     where
         F: Fn(&dyn Transaction<Database = FdbDatabase>) -> FdbResult<T>,
     {
-        self.db
-            .run(f)
-            .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
+        match self.db.run(f) {
+            Ok(_) => {
+                if is_database {
+                    self.store(
+                        inst_number,
+                        StackEntryItem::Bytes(Bytes::from_static(&b"RESULT_NOT_PRESENT"[..])),
+                    );
+                }
+            }
+            Err(err) => {
+                let item = StackEntryItem::Bytes({
+                    let mut t = Tuple::new();
+                    t.add_bytes(Bytes::from(&b"ERROR"[..]));
+                    t.add_bytes(Bytes::from(format!("{}", err.code())));
+                    t.pack()
+                });
 
-        if is_database {
-            self.store(
-                inst_number,
-                StackEntryItem::Bytes(Bytes::from_static(&b"RESULT_NOT_PRESENT"[..])),
-            );
+                self.store(inst_number, item);
+            }
         }
     }
 
@@ -698,9 +746,6 @@ impl StackMachine {
             let inst = Tuple::from_bytes(kv.get_value().clone().into()).unwrap_or_else(|err| {
                 panic!("Error occurred during `Tuple::from_bytes`: {:?}", err)
             });
-            if self.verbose {
-                println!("Instruction {}", inst_number);
-            }
             self.process_inst(inst_number, inst);
         }
     }
@@ -711,11 +756,17 @@ impl StackMachine {
             .unwrap_or_else(|err| panic!("Error occurred during `inst.get_string_ref`: {:?}", err))
             .clone();
 
-        if self.verbose {
-            println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
+        let verbose_inst_range = VERBOSE_INST_RANGE
+            .map(|x| x.contains(&inst_number))
+            .unwrap_or(false);
+
+        if self.verbose || verbose_inst_range {
             println!("Stack from [");
             self.dump_stack();
             println!(" ] ({})", self.stack.len());
+            println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
+        } else if VERBOSE_INST_ONLY {
+            println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
         }
 
         // `NEW_TRANSACTION` op is special. We assume that we have a
@@ -870,8 +921,11 @@ impl StackMachine {
                 //
                 // While there is no classification of FoundationDB
                 // operations in the spec, we have a classification in the
-                // `api.py` test generator [2]. We have organized our
-                // tests accordingly.
+                // `api.py` test generator [2].
+                //
+                // Following order is followed.
+                // - resets
+                // - tuples
                 //
                 // `NEW_TRANSACTION` is taken care of at the beginning
                 // of this function.
@@ -933,8 +987,12 @@ impl StackMachine {
                 }
                 "RESET" => unsafe { t.reset() },
                 "CANCEL" => unsafe { t.cancel() },
-                // versions
+                // Take care of `GET_READ_VERSION`, `SET`, `ATOMIC_OP` here as it
+                // is one of the first APIs that is needed for binding
+                // tester to work.
                 "GET_READ_VERSION" => {
+                    // If it is a `GET_READ_VERSION` then, `rt` would
+                    // be `.snapshot()`.
                     self.last_version = rt
                         .read(|tr| Ok(unsafe { tr.get_read_version() }.join()?))
                         .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
@@ -943,144 +1001,6 @@ impl StackMachine {
                         StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
                     );
                 }
-                "SET_READ_VERSION" => unsafe { t.set_read_version(self.last_version) },
-                "GET_COMMITTED_VERSION" => {
-                    self.last_version =
-                        unsafe { t.get_committed_version() }.unwrap_or_else(|err| {
-                            panic!("Error occurred during `get_committed_version`: {:?}", err)
-                        });
-                    self.store(
-                        inst_number,
-                        StackEntryItem::Bytes(Bytes::from_static(&b"GOT_COMMITTED_VERSION"[..])),
-                    );
-                }
-                // reads, snapshot_reads, database_reads
-                "GET" => {
-                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                        b
-                    } else {
-                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                    };
-
-                    // In Java and Go bindings, it is possible to leak a
-                    // future from the closure. We do not allow this
-                    // pattern in our bindings. So, we resolve the future
-                    // within the closure.
-                    let item = StackEntryItem::Bytes(
-                        rt.read(|tr| Ok(tr.get(key.clone().into()).join()?))
-                            .unwrap_or_else(|err| panic!("Error occured during `read`: {:?}", err))
-                            .map(|v| v.into())
-                            .unwrap_or_else(|| Bytes::from(&b"RESULT_NOT_PRESENT"[..])),
-                    );
-
-                    self.store(inst_number, item);
-                }
-                "GET_KEY" => {
-                    let sel = self.pop_selector(t);
-                    let prefix =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                            b
-                        } else {
-                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                        };
-
-                    let key_bytes = Bytes::from(
-                        rt.read(|tr| Ok(tr.get_key(sel.clone()).join()?))
-                            .unwrap_or_else(|err| {
-                                panic!("Error occurred during `read`: {:?}", err)
-                            }),
-                    );
-
-                    if bytes_util::starts_with(key_bytes.clone(), prefix.clone()) {
-                        self.store(inst_number, StackEntryItem::Bytes(key_bytes));
-                    } else if key_bytes.cmp(&prefix) == Ordering::Less {
-                        self.store(inst_number, StackEntryItem::Bytes(prefix));
-                    } else {
-                        self.store(
-                            inst_number,
-                            StackEntryItem::Bytes(bytes_util::strinc(prefix).unwrap_or_else(
-                                |err| {
-                                    panic!("Error occurred during `bytes_util::strinc`: {:?}", err)
-                                },
-                            )),
-                        );
-                    }
-                }
-                "GET_RANGE" | "GET_RANGE_STARTS_WITH" | "GET_RANGE_SELECTOR" => {
-                    let (begin_key_selector, end_key_selector, prefix) = match op.as_str() {
-                        "GET_RANGE_STARTS_WITH" => {
-                            let prefix_range = self.pop_prefix_range(t);
-                            (
-                                KeySelector::first_greater_or_equal(prefix_range.begin().clone()),
-                                KeySelector::first_greater_or_equal(prefix_range.end().clone()),
-                                None,
-                            )
-                        }
-                        "GET_RANGE_SELECTOR" => {
-                            let begin_ks = self.pop_selector(t);
-                            let end_ks = self.pop_selector(t);
-                            let prefix = if let NonFutureStackEntryItem::Bytes(b) =
-                                self.wait_and_pop(t).item
-                            {
-                                b
-                            } else {
-                                panic!(
-                                    "NonFutureStackEntryItem::Bytes was expected, but not found"
-                                );
-                            };
-                            (begin_ks, end_ks, Some(prefix))
-                        }
-                        _ => {
-                            // GET_RANGE
-                            let key_range = self.pop_key_range(t);
-                            (
-                                KeySelector::first_greater_or_equal(key_range.begin().clone()),
-                                KeySelector::first_greater_or_equal(key_range.end().clone()),
-                                None,
-                            )
-                        }
-                    };
-
-                    let range_options = self.pop_range_options(t);
-
-                    let kvs = rt
-                        .read(|tr| {
-                            Ok(tr
-                                .get_range(
-                                    begin_key_selector.clone(),
-                                    end_key_selector.clone(),
-                                    range_options.clone(),
-                                )
-                                .get()?)
-                        })
-                        .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
-
-                    let mut res = Tuple::new();
-
-                    for kv in kvs {
-                        if let Some(ref p) = prefix {
-                            // GET_RANGE_SELECTOR
-                            if bytes_util::starts_with(kv.get_key().clone().into(), p.clone()) {
-                                res.add_bytes(kv.get_key().clone().into());
-                                res.add_bytes(kv.get_value().clone().into());
-                            }
-                        } else {
-                            // GET_RANGE, GET_RANGE_STARTS_WITH
-                            res.add_bytes(kv.get_key().clone().into());
-                            res.add_bytes(kv.get_value().clone().into());
-                        }
-                    }
-
-                    self.store(inst_number, StackEntryItem::Bytes(res.pack()));
-                }
-                // mutations, database_mutations
-                //
-                // TODO: `SET` is done, but the rest of mutations is
-                //       to be implemented.
-                // - CLEAR
-                // - CLEAR_RANGE
-                // - CLEAR_RANGE_STARTS_WITH
-                // - ATOMIC_OP
                 "SET" => {
                     let key = Into::<Key>::into(
                         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
@@ -1107,11 +1027,499 @@ impl StackMachine {
                         inst_number,
                     );
                 }
+                "ATOMIC_OP" => {
+                    // `OPTYPE` is a string, while `KEY` and `VALUE` are bytes.
+                    let op_name =
+                        if let NonFutureStackEntryItem::String(s) = self.wait_and_pop(t).item {
+                            s
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
+
+                    let mutation_type = StackMachine::from_mutation_type_string(op_name);
+
+                    let key = Into::<Key>::into(
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        },
+                    );
+
+                    let param = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item
+                    {
+                        b
+                    } else {
+                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                    };
+
+                    self.execute_mutation(
+                        |tr| {
+                            unsafe {
+                                tr.mutate(mutation_type, key.clone(), param.clone());
+                            }
+                            Ok(())
+                        },
+                        is_database,
+                        inst_number,
+                    );
+                }
+                // tuples
+                //
+                // NOTE: Even though `SUB` [1] is mentioned in
+                // `tuples` in `api.py`, we deal with it as part of
+                // data operations.
+                //
+                // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/tests/api.py#L153
+                "TUPLE_PACK" => {
+                    let count = usize::try_from(
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                            bi
+                        } else {
+                            panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
+                        },
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `usize::try_from`: {:?}", err);
+                    });
+
+                    let mut res = Tuple::new();
+
+                    for _ in 0..count {
+                        // `add_bigint` code internally uses
+                        // `add_i64`, `add_i32`, `add_i16, `add_i8`.
+                        match self.wait_and_pop(t).item {
+                            NonFutureStackEntryItem::BigInt(bi) => res.add_bigint(bi),
+                            NonFutureStackEntryItem::Bool(b) => res.add_bool(b),
+                            NonFutureStackEntryItem::Bytes(b) => res.add_bytes(b),
+                            NonFutureStackEntryItem::Float(f) => res.add_f32(f),
+                            NonFutureStackEntryItem::Double(d) => res.add_f64(d),
+                            NonFutureStackEntryItem::Null => res.add_null(),
+                            NonFutureStackEntryItem::String(s) => res.add_string(s),
+                            NonFutureStackEntryItem::Tuple(t) => res.add_tuple(t),
+                            NonFutureStackEntryItem::Uuid(u) => res.add_uuid(u),
+                            NonFutureStackEntryItem::Versionstamp(v) => res.add_versionstamp(v),
+                        }
+                    }
+
+                    self.store(inst_number, StackEntryItem::Bytes(res.pack()));
+                }
+                "TUPLE_PACK_WITH_VERSIONSTAMP" => {
+                    let prefix =
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
+
+                    let count = usize::try_from(
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                            bi
+                        } else {
+                            panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
+                        },
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `usize::try_from`: {:?}", err)
+                    });
+
+                    let mut res = Tuple::new();
+
+                    for _ in 0..count {
+                        // `add_bigint` code internally uses
+                        // `add_i64`, `add_i32`, `add_i16, `add_i8`.
+                        match self.wait_and_pop(t).item {
+                            NonFutureStackEntryItem::BigInt(bi) => res.add_bigint(bi),
+                            NonFutureStackEntryItem::Bool(b) => res.add_bool(b),
+                            NonFutureStackEntryItem::Bytes(b) => res.add_bytes(b),
+                            NonFutureStackEntryItem::Float(f) => res.add_f32(f),
+                            NonFutureStackEntryItem::Double(d) => res.add_f64(d),
+                            NonFutureStackEntryItem::Null => res.add_null(),
+                            NonFutureStackEntryItem::String(s) => res.add_string(s),
+                            NonFutureStackEntryItem::Tuple(t) => res.add_tuple(t),
+                            NonFutureStackEntryItem::Uuid(u) => res.add_uuid(u),
+                            NonFutureStackEntryItem::Versionstamp(v) => res.add_versionstamp(v),
+                        }
+                    }
+
+                    match res.pack_with_versionstamp(prefix) {
+                        Ok(packed) => {
+                            self.store(
+                                inst_number,
+                                StackEntryItem::Bytes(Bytes::from_static(&b"OK"[..])),
+                            );
+
+                            self.store(inst_number, StackEntryItem::Bytes(packed));
+                        }
+                        Err(err) => match err.code() {
+                            TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND => self.store(
+                                inst_number,
+                                StackEntryItem::Bytes(Bytes::from_static(&b"ERROR: NONE"[..])),
+                            ),
+                            TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND => self.store(
+                                inst_number,
+                                StackEntryItem::Bytes(Bytes::from_static(&b"ERROR: MULTIPLE"[..])),
+                            ),
+                            _ => panic!("Received invalid FdbError code: {:?}", err.code()),
+                        },
+                    }
+                }
+                "TUPLE_UNPACK" => {
+                    let packed_tuple = Tuple::from_bytes(
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        },
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `Types::from_bytes`: {:?}", err);
+                    });
+
+                    for ti in 0..packed_tuple.size() {
+                        let mut res = Tuple::new();
+
+                        let _ = packed_tuple
+                            .get_bigint(ti)
+                            .map(|bi| res.add_bigint(bi))
+                            .or_else(|_| packed_tuple.get_bool(ti).map(|b| res.add_bool(b)))
+                            .or_else(|_| {
+                                packed_tuple
+                                    .get_bytes_ref(ti)
+                                    .map(|b| res.add_bytes(b.clone()))
+                            })
+                            .or_else(|_| packed_tuple.get_f32(ti).map(|f| res.add_f32(f)))
+                            .or_else(|_| packed_tuple.get_f64(ti).map(|d| res.add_f64(d)))
+                            .or_else(|_| packed_tuple.get_null(ti).map(|_| res.add_null()))
+                            .or_else(|_| {
+                                packed_tuple
+                                    .get_string_ref(ti)
+                                    .map(|s| res.add_string(s.clone()))
+                            })
+                            .or_else(|_| {
+                                packed_tuple
+                                    .get_tuple_ref(ti)
+                                    .map(|tup_ref| res.add_tuple(tup_ref.clone()))
+                            })
+                            .or_else(|_| {
+                                packed_tuple
+                                    .get_uuid_ref(ti)
+                                    .map(|u| res.add_uuid(u.clone()))
+                            })
+                            .or_else(|_| {
+                                packed_tuple
+                                    .get_versionstamp_ref(ti)
+                                    .map(|vs| res.add_versionstamp(vs.clone()))
+                            })
+                            .unwrap_or_else(|_| {
+                                panic!("Unable to unpack packed_tuple: {:?}", packed_tuple);
+                            });
+
+                        self.store(inst_number, StackEntryItem::Bytes(res.pack()));
+                    }
+                }
+                "TUPLE_RANGE" => {
+                    let count = usize::try_from(
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                            bi
+                        } else {
+                            panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
+                        },
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `usize::try_from`: {:?}", err);
+                    });
+
+                    let mut res_tup = Tuple::new();
+
+                    for _ in 0..count {
+                        // `add_bigint` code internally uses
+                        // `add_i64`, `add_i32`, `add_i16, `add_i8`.
+                        match self.wait_and_pop(t).item {
+                            NonFutureStackEntryItem::BigInt(bi) => res_tup.add_bigint(bi),
+                            NonFutureStackEntryItem::Bool(b) => res_tup.add_bool(b),
+                            NonFutureStackEntryItem::Bytes(b) => res_tup.add_bytes(b),
+                            NonFutureStackEntryItem::Float(f) => res_tup.add_f32(f),
+                            NonFutureStackEntryItem::Double(d) => res_tup.add_f64(d),
+                            NonFutureStackEntryItem::Null => res_tup.add_null(),
+                            NonFutureStackEntryItem::String(s) => res_tup.add_string(s),
+                            NonFutureStackEntryItem::Tuple(t) => res_tup.add_tuple(t),
+                            NonFutureStackEntryItem::Uuid(u) => res_tup.add_uuid(u),
+                            NonFutureStackEntryItem::Versionstamp(v) => res_tup.add_versionstamp(v),
+                        }
+                    }
+
+                    let res_range = res_tup.range(Bytes::new());
+
+                    self.store(
+                        inst_number,
+                        StackEntryItem::Bytes(res_range.begin().clone().into()),
+                    );
+                    self.store(
+                        inst_number,
+                        StackEntryItem::Bytes(res_range.end().clone().into()),
+                    );
+                }
+                "TUPLE_SORT" => {
+                    let mut count = usize::try_from(
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                            bi
+                        } else {
+                            panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
+                        },
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `usize::try_from`: {:?}", err);
+                    });
+
+                    iter::from_fn(|| {
+                        if count == 0 {
+                            None
+                        } else {
+                            count -= 1;
+                            Some(Tuple::from_bytes(
+			    if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item
+			    {
+				b
+			    } else {
+				panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+			    })
+			.unwrap_or_else(|err| panic!("Error occurred during `Tuple::from_bytes`: {:?}", err)))
+                        }
+                    })
+                    .sorted()
+                    .for_each(|tup| self.store(inst_number, StackEntryItem::Bytes(tup.pack())));
+                }
+                "ENCODE_FLOAT" => {
+                    let val_bytes =
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
+
+                    let val = (&val_bytes[..]).get_f32();
+
+                    self.store(inst_number, StackEntryItem::Float(val));
+                }
+                "ENCODE_DOUBLE" => {
+                    let val_bytes =
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
+
+                    let val = (&val_bytes[..]).get_f64();
+
+                    self.store(inst_number, StackEntryItem::Double(val));
+                }
+                "DECODE_FLOAT" => {
+                    let val = if let NonFutureStackEntryItem::Float(f) = self.wait_and_pop(t).item {
+                        f
+                    } else {
+                        panic!("NonFutureStackEntryItem::Float was expected, but not found");
+                    };
+
+                    let val_bytes = {
+                        let mut b = BytesMut::new();
+                        b.put(&val.to_be_bytes()[..]);
+                        b.into()
+                    };
+
+                    self.store(inst_number, StackEntryItem::Bytes(val_bytes));
+                }
+                "DECODE_DOUBLE" => {
+                    let val = if let NonFutureStackEntryItem::Double(d) = self.wait_and_pop(t).item
+                    {
+                        d
+                    } else {
+                        panic!("NonFutureStackEntryItem::Double was expected, but not found");
+                    };
+
+                    let val_bytes = {
+                        let mut b = BytesMut::new();
+                        b.put(&val.to_be_bytes()[..]);
+                        b.into()
+                    };
+
+                    self.store(inst_number, StackEntryItem::Bytes(val_bytes));
+                }
+                // versions, snapshot_versions
+                "SET_READ_VERSION" => unsafe { t.set_read_version(self.last_version) },
+                "GET_COMMITTED_VERSION" => {
+                    self.last_version =
+                        unsafe { t.get_committed_version() }.unwrap_or_else(|err| {
+                            panic!("Error occurred during `get_committed_version`: {:?}", err)
+                        });
+                    self.store(
+                        inst_number,
+                        StackEntryItem::Bytes(Bytes::from_static(&b"GOT_COMMITTED_VERSION"[..])),
+                    );
+                }
+                // // reads, snapshot_reads, database_reads
+                // "GET" => {
+                //     let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                //         b
+                //     } else {
+                //         panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                //     };
+
+                //     // In Java and Go bindings, it is possible to leak a
+                //     // future from the closure. We do not allow this
+                //     // pattern in our bindings. So, we resolve the future
+                //     // within the closure.
+                //     let item = StackEntryItem::Bytes(
+                //         rt.read(|tr| Ok(tr.get(key.clone().into()).join()?))
+                //             .unwrap_or_else(|err| panic!("Error occured during `read`: {:?}", err))
+                //             .map(|v| v.into())
+                //             .unwrap_or_else(|| Bytes::from(&b"RESULT_NOT_PRESENT"[..])),
+                //     );
+
+                //     self.store(inst_number, item);
+                // }
+                // "GET_KEY" => {
+                //     let sel = self.pop_selector(t);
+
+                //     let prefix =
+                //         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                //             b
+                //         } else {
+                //             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                //         };
+
+                //     let key_bytes = Bytes::from(
+                //         rt.read(|tr| Ok(tr.get_key(sel.clone()).join()?))
+                //             .unwrap_or_else(|err| {
+                //                 panic!("Error occurred during `read`: {:?}", err)
+                //             }),
+                //     );
+
+                //     if bytes_util::starts_with(key_bytes.clone(), prefix.clone()) {
+                //         self.store(inst_number, StackEntryItem::Bytes(key_bytes));
+                //     } else if key_bytes.cmp(&prefix) == Ordering::Less {
+                //         self.store(inst_number, StackEntryItem::Bytes(prefix));
+                //     } else {
+                //         self.store(
+                //             inst_number,
+                //             StackEntryItem::Bytes(bytes_util::strinc(prefix).unwrap_or_else(
+                //                 |err| {
+                //                     panic!("Error occurred during `bytes_util::strinc`: {:?}", err)
+                //                 },
+                //             )),
+                //         );
+                //     }
+                // }
+                // "GET_RANGE" | "GET_RANGE_STARTS_WITH" | "GET_RANGE_SELECTOR" => {
+                //     let (begin_key_selector, end_key_selector) = match op.as_str() {
+                //         "GET_RANGE_STARTS_WITH" => {
+                //             let prefix_range = self.pop_prefix_range(t);
+                //             (
+                //                 KeySelector::first_greater_or_equal(prefix_range.begin().clone()),
+                //                 KeySelector::first_greater_or_equal(prefix_range.end().clone()),
+                //             )
+                //         }
+                //         "GET_RANGE_SELECTOR" => {
+                //             let begin_ks = self.pop_selector(t);
+                //             let end_ks = self.pop_selector(t);
+                //             (begin_ks, end_ks)
+                //         }
+                //         _ => {
+                //             // GET_RANGE
+                //             let key_range = self.pop_key_range(t);
+                //             (
+                //                 KeySelector::first_greater_or_equal(key_range.begin().clone()),
+                //                 KeySelector::first_greater_or_equal(key_range.end().clone()),
+                //             )
+                //         }
+                //     };
+
+                //     let range_options = self.pop_range_options(t);
+
+                //     let mut prefix = None;
+                //     if op.as_str() == "GET_RANGE_SELECTOR" {
+                //         prefix = Some(
+                //             if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                //                 b
+                //             } else {
+                //                 panic!(
+                //                     "NonFutureStackEntryItem::Bytes was expected, but not found"
+                //                 );
+                //             },
+                //         );
+                //     }
+
+                //     let kvs = rt
+                //         .read(|tr| {
+                //             Ok(tr
+                //                 .get_range(
+                //                     begin_key_selector.clone(),
+                //                     end_key_selector.clone(),
+                //                     range_options.clone(),
+                //                 )
+                //                 .get()?)
+                //         })
+                //         .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
+
+                //     let mut res = Tuple::new();
+
+                //     for kv in kvs {
+                //         if let Some(ref p) = prefix {
+                //             // GET_RANGE_SELECTOR
+                //             if bytes_util::starts_with(kv.get_key().clone().into(), p.clone()) {
+                //                 res.add_bytes(kv.get_key().clone().into());
+                //                 res.add_bytes(kv.get_value().clone().into());
+                //             }
+                //         } else {
+                //             // GET_RANGE, GET_RANGE_STARTS_WITH
+                //             res.add_bytes(kv.get_key().clone().into());
+                //             res.add_bytes(kv.get_value().clone().into());
+                //         }
+                //     }
+
+                //     self.store(inst_number, StackEntryItem::Bytes(res.pack()));
+                // }
+                // // mutations, database_mutations
+                // "CLEAR" => {
+                //     let key = Into::<Key>::into(
+                //         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                //             b
+                //         } else {
+                //             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                //         },
+                //     );
+
+                //     self.execute_mutation(
+                //         |tr| {
+                //             tr.clear(key.clone());
+                //             Ok(())
+                //         },
+                //         is_database,
+                //         inst_number,
+                //     );
+                // }
+                // "CLEAR_RANGE" | "CLEAR_RANGE_STARTS_WITH" => {
+                //     let exact_range = if op.as_str() == "CLEAR_RANGE_STARTS_WITH" {
+                //         self.pop_prefix_range(t)
+                //     } else {
+                //         // CLEAR_RANGE
+                //         self.pop_key_range(t)
+                //     };
+
+                //     self.execute_mutation(
+                //         |tr| {
+                //             tr.clear_range(exact_range.clone());
+                //             Ok(())
+                //         },
+                //         is_database,
+                //         inst_number,
+                //     );
+                // }
                 _ => panic!("Unhandled operation {}", op),
             }
         }
 
-        if self.verbose {
+        if self.verbose || verbose_inst_range {
             println!("        to [");
             self.dump_stack();
             println!(" ] ({})\n", self.stack.len());

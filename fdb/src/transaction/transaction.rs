@@ -132,7 +132,11 @@ pub trait Transaction: ReadTransaction {
     /// out several logical steps: reading the value of a key,
     /// performing a transformation on that value, and writing the
     /// result.
-    fn mutate(&self, optype: MutationType, key: Key, param: Bytes);
+    ///
+    /// # Safety
+    ///
+    /// See the warning for [`MutationType::AppendIfFits`] variant.
+    unsafe fn mutate(&self, optype: MutationType, key: Key, param: Bytes);
 
     /// Reset the [`Transaction`].
     ///
