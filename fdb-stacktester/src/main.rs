@@ -942,10 +942,11 @@ impl StackMachine {
                     self.switch_transaction(tr_name);
                 }
                 "COMMIT" => {
-                    // Instead of Go `sm.currentTransaction().Commit()`,
-                    // we our Java equivalent of `inst.tr.commit()`.
-                    let item =
-                        StackEntryItem::FdbFutureUnit(FdbFuture::into_raw(unsafe { t.commit() }));
+                    let item = StackEntryItem::FdbFutureUnit(FdbFuture::into_raw(unsafe {
+                        self.current_transaction(&current_transaction_lifetime)
+                            .commit()
+                    }));
+
                     self.store(inst_number, item);
                 }
                 "WAIT_FUTURE" => {
@@ -981,25 +982,49 @@ impl StackMachine {
                     self.store(
                         inst_number,
                         StackEntryItem::FdbFutureUnit(FdbFuture::into_raw(unsafe {
-                            t.on_error(fdb_error)
+                            self.current_transaction(&current_transaction_lifetime)
+                                .on_error(fdb_error)
                         })),
                     );
                 }
-                "RESET" => unsafe { t.reset() },
-                "CANCEL" => unsafe { t.cancel() },
+                "RESET" => unsafe {
+                    self.current_transaction(&current_transaction_lifetime)
+                        .reset()
+                },
+                "CANCEL" => unsafe {
+                    self.current_transaction(&current_transaction_lifetime)
+                        .cancel()
+                },
                 // Take care of `GET_READ_VERSION`, `SET`, `ATOMIC_OP` here as it
                 // is one of the first APIs that is needed for binding
                 // tester to work.
                 "GET_READ_VERSION" => {
                     // If it is a `GET_READ_VERSION` then, `rt` would
                     // be `.snapshot()`.
-                    self.last_version = rt
-                        .read(|tr| Ok(unsafe { tr.get_read_version() }.join()?))
-                        .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
-                    self.store(
-                        inst_number,
-                        StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
-                    );
+                    //
+                    // It is also possible that `read` might fail
+                    // (error code 1025), in which case we push an
+                    // error onto the stack.
+                    match rt.read(|rtr| Ok(unsafe { rtr.get_read_version() }.join()?)) {
+                        Ok(last_version) => {
+                            self.last_version = last_version;
+
+                            self.store(
+                                inst_number,
+                                StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
+                            );
+                        }
+                        Err(err) => {
+                            let item = StackEntryItem::Bytes({
+                                let mut t = Tuple::new();
+                                t.add_bytes(Bytes::from(&b"ERROR"[..]));
+                                t.add_bytes(Bytes::from(format!("{}", err.code())));
+                                t.pack()
+                            });
+
+                            self.store(inst_number, item);
+                        }
+                    }
                 }
                 "SET" => {
                     let key = Into::<Key>::into(
@@ -1346,12 +1371,18 @@ impl StackMachine {
                     self.store(inst_number, StackEntryItem::Bytes(val_bytes));
                 }
                 // versions, snapshot_versions
-                "SET_READ_VERSION" => unsafe { t.set_read_version(self.last_version) },
+                "SET_READ_VERSION" => unsafe {
+                    self.current_transaction(&current_transaction_lifetime)
+                        .set_read_version(self.last_version)
+                },
                 "GET_COMMITTED_VERSION" => {
-                    self.last_version =
-                        unsafe { t.get_committed_version() }.unwrap_or_else(|err| {
-                            panic!("Error occurred during `get_committed_version`: {:?}", err)
-                        });
+                    self.last_version = unsafe {
+                        self.current_transaction(&current_transaction_lifetime)
+                            .get_committed_version()
+                    }
+                    .unwrap_or_else(|err| {
+                        panic!("Error occurred during `get_committed_version`: {:?}", err)
+                    });
                     self.store(
                         inst_number,
                         StackEntryItem::Bytes(Bytes::from_static(&b"GOT_COMMITTED_VERSION"[..])),
