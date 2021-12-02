@@ -46,7 +46,7 @@ use std::mem;
 use std::ops::Range as OpsRange;
 use std::sync::Arc;
 
-const VERBOSE: bool = false;
+const VERBOSE: bool = true;
 const VERBOSE_INST_RANGE: Option<OpsRange<usize>> = None;
 const VERBOSE_INST_ONLY: bool = false;
 
@@ -543,6 +543,18 @@ impl StackMachine {
         Range::starts_with(prefix_key)
     }
 
+    // In Go bindings this is handled by `defer`.
+    fn push_err(&mut self, inst_number: usize, err: FdbError) {
+        let item = StackEntryItem::Bytes({
+            let mut t = Tuple::new();
+            t.add_bytes(Bytes::from(&b"ERROR"[..]));
+            t.add_bytes(Bytes::from(format!("{}", err.code())));
+            t.pack()
+        });
+
+        self.store(inst_number, item);
+    }
+
     // This function mutates the database and does not use the global
     // transaction map. In Go, it uses `Transact` method, which is on
     // `Database` type.
@@ -569,16 +581,7 @@ impl StackMachine {
                     );
                 }
             }
-            Err(err) => {
-                let item = StackEntryItem::Bytes({
-                    let mut t = Tuple::new();
-                    t.add_bytes(Bytes::from(&b"ERROR"[..]));
-                    t.add_bytes(Bytes::from(format!("{}", err.code())));
-                    t.pack()
-                });
-
-                self.store(inst_number, item);
-            }
+            Err(err) => self.push_err(inst_number, err),
         }
     }
 
@@ -722,30 +725,30 @@ impl StackMachine {
     }
 
     fn run(&mut self) {
-        let kvs = self
-            .db
-            .read(|tr| {
-                let ops_range = {
-                    let mut t = Tuple::new();
-                    t.add_bytes(self.prefix.clone().into());
-                    t
-                }
-                .range(Bytes::new());
-
-                Ok(tr
-                    .get_range(
-                        KeySelector::first_greater_or_equal(ops_range.begin().clone().into()),
-                        KeySelector::first_greater_or_equal(ops_range.end().clone().into()),
-                        RangeOptions::default(),
-                    )
-                    .get()?)
-            })
-            .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
-
-        for (inst_number, kv) in kvs.into_iter().enumerate() {
-            let inst = Tuple::from_bytes(kv.get_value().clone().into()).unwrap_or_else(|err| {
-                panic!("Error occurred during `Tuple::from_bytes`: {:?}", err)
-            });
+        for (inst_number, inst) in [
+            // setup `last_version` to some good value
+            "NEW_TRANSACTION",
+            "GET_READ_VERSION",
+            "COMMIT",
+            "WAIT_FUTURE",
+            // minimal
+            "NEW_TRANSACTION",
+            "COMMIT",
+            "WAIT_FUTURE",
+            "GET_COMMITTED_VERSION",
+            "RESET",
+            "SET_READ_VERSION",
+            "CANCEL",
+            "GET_READ_VERSION",
+        ]
+        .iter()
+        .map(|x| {
+            let mut t = Tuple::new();
+            t.add_string(x.to_string());
+            t
+        })
+        .enumerate()
+        {
             self.process_inst(inst_number, inst);
         }
     }
@@ -764,6 +767,8 @@ impl StackMachine {
             println!("Stack from [");
             self.dump_stack();
             println!(" ] ({})", self.stack.len());
+            println!("tr_map: {:?}", self.tr_map);
+            println!("last_version: {:?}", self.last_version);
             println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
         } else if VERBOSE_INST_ONLY {
             println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
@@ -987,14 +992,22 @@ impl StackMachine {
                         })),
                     );
                 }
-                "RESET" => unsafe {
+                "RESET" =>
+                // TODO
+                //
+                // In Java bindings, this is `self.new_transaction()`,
+                // but Go bindings uses `reset()` on the transaction.
+                unsafe {
                     self.current_transaction(&current_transaction_lifetime)
                         .reset()
-                },
-                "CANCEL" => unsafe {
+                }
+                "CANCEL" =>
+                // TODO
+                unsafe {
                     self.current_transaction(&current_transaction_lifetime)
                         .cancel()
-                },
+                }
+
                 // Take care of `GET_READ_VERSION`, `SET`, `ATOMIC_OP` here as it
                 // is one of the first APIs that is needed for binding
                 // tester to work.
@@ -1014,16 +1027,7 @@ impl StackMachine {
                                 StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
                             );
                         }
-                        Err(err) => {
-                            let item = StackEntryItem::Bytes({
-                                let mut t = Tuple::new();
-                                t.add_bytes(Bytes::from(&b"ERROR"[..]));
-                                t.add_bytes(Bytes::from(format!("{}", err.code())));
-                                t.pack()
-                            });
-
-                            self.store(inst_number, item);
-                        }
+                        Err(err) => self.push_err(inst_number, err),
                     }
                 }
                 "SET" => {
@@ -1388,128 +1392,141 @@ impl StackMachine {
                         StackEntryItem::Bytes(Bytes::from_static(&b"GOT_COMMITTED_VERSION"[..])),
                     );
                 }
-                // // reads, snapshot_reads, database_reads
-                // "GET" => {
-                //     let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                //         b
-                //     } else {
-                //         panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                //     };
+                // reads, snapshot_reads, database_reads
+                //
+                // TODO: removed other tests to see if can track down
+                // the "on_error" error incuding tuple
+                "GET" => {
+                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        b
+                    } else {
+                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                    };
 
-                //     // In Java and Go bindings, it is possible to leak a
-                //     // future from the closure. We do not allow this
-                //     // pattern in our bindings. So, we resolve the future
-                //     // within the closure.
-                //     let item = StackEntryItem::Bytes(
-                //         rt.read(|tr| Ok(tr.get(key.clone().into()).join()?))
-                //             .unwrap_or_else(|err| panic!("Error occured during `read`: {:?}", err))
-                //             .map(|v| v.into())
-                //             .unwrap_or_else(|| Bytes::from(&b"RESULT_NOT_PRESENT"[..])),
-                //     );
+                    // In Java and Go bindings, it is possible to leak a
+                    // future from the closure. We do not allow this
+                    // pattern in our bindings. So, we resolve the future
+                    // within the closure.
+                    match rt.read(|tr| Ok(tr.get(key.clone().into()).join()?)) {
+                        Ok(value) => {
+                            let item = StackEntryItem::Bytes(
+                                value
+                                    .map(|v| v.into())
+                                    .unwrap_or_else(|| Bytes::from(&b"RESULT_NOT_PRESENT"[..])),
+                            );
+                            self.store(inst_number, item);
+                        }
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
+                "GET_KEY" => {
+                    let sel = self.pop_selector(t);
 
-                //     self.store(inst_number, item);
-                // }
-                // "GET_KEY" => {
-                //     let sel = self.pop_selector(t);
+                    let prefix =
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
 
-                //     let prefix =
-                //         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                //             b
-                //         } else {
-                //             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                //         };
+                    match rt.read(|tr| Ok(tr.get_key(sel.clone()).join()?)) {
+                        Ok(kb) => {
+                            let key_bytes = Bytes::from(kb);
 
-                //     let key_bytes = Bytes::from(
-                //         rt.read(|tr| Ok(tr.get_key(sel.clone()).join()?))
-                //             .unwrap_or_else(|err| {
-                //                 panic!("Error occurred during `read`: {:?}", err)
-                //             }),
-                //     );
+                            if bytes_util::starts_with(key_bytes.clone(), prefix.clone()) {
+                                self.store(inst_number, StackEntryItem::Bytes(key_bytes));
+                            } else if key_bytes.cmp(&prefix) == Ordering::Less {
+                                self.store(inst_number, StackEntryItem::Bytes(prefix));
+                            } else {
+                                self.store(
+                                    inst_number,
+                                    StackEntryItem::Bytes(
+                                        bytes_util::strinc(prefix).unwrap_or_else(|err| {
+                                            panic!(
+                                                "Error occurred during `bytes_util::strinc`: {:?}",
+                                                err
+                                            )
+                                        }),
+                                    ),
+                                );
+                            }
+                        }
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
+                "GET_RANGE" | "GET_RANGE_STARTS_WITH" | "GET_RANGE_SELECTOR" => {
+                    let (begin_key_selector, end_key_selector) = match op.as_str() {
+                        "GET_RANGE_STARTS_WITH" => {
+                            let prefix_range = self.pop_prefix_range(t);
+                            (
+                                KeySelector::first_greater_or_equal(prefix_range.begin().clone()),
+                                KeySelector::first_greater_or_equal(prefix_range.end().clone()),
+                            )
+                        }
+                        "GET_RANGE_SELECTOR" => {
+                            let begin_ks = self.pop_selector(t);
+                            let end_ks = self.pop_selector(t);
+                            (begin_ks, end_ks)
+                        }
+                        _ => {
+                            // GET_RANGE
+                            let key_range = self.pop_key_range(t);
+                            (
+                                KeySelector::first_greater_or_equal(key_range.begin().clone()),
+                                KeySelector::first_greater_or_equal(key_range.end().clone()),
+                            )
+                        }
+                    };
 
-                //     if bytes_util::starts_with(key_bytes.clone(), prefix.clone()) {
-                //         self.store(inst_number, StackEntryItem::Bytes(key_bytes));
-                //     } else if key_bytes.cmp(&prefix) == Ordering::Less {
-                //         self.store(inst_number, StackEntryItem::Bytes(prefix));
-                //     } else {
-                //         self.store(
-                //             inst_number,
-                //             StackEntryItem::Bytes(bytes_util::strinc(prefix).unwrap_or_else(
-                //                 |err| {
-                //                     panic!("Error occurred during `bytes_util::strinc`: {:?}", err)
-                //                 },
-                //             )),
-                //         );
-                //     }
-                // }
-                // "GET_RANGE" | "GET_RANGE_STARTS_WITH" | "GET_RANGE_SELECTOR" => {
-                //     let (begin_key_selector, end_key_selector) = match op.as_str() {
-                //         "GET_RANGE_STARTS_WITH" => {
-                //             let prefix_range = self.pop_prefix_range(t);
-                //             (
-                //                 KeySelector::first_greater_or_equal(prefix_range.begin().clone()),
-                //                 KeySelector::first_greater_or_equal(prefix_range.end().clone()),
-                //             )
-                //         }
-                //         "GET_RANGE_SELECTOR" => {
-                //             let begin_ks = self.pop_selector(t);
-                //             let end_ks = self.pop_selector(t);
-                //             (begin_ks, end_ks)
-                //         }
-                //         _ => {
-                //             // GET_RANGE
-                //             let key_range = self.pop_key_range(t);
-                //             (
-                //                 KeySelector::first_greater_or_equal(key_range.begin().clone()),
-                //                 KeySelector::first_greater_or_equal(key_range.end().clone()),
-                //             )
-                //         }
-                //     };
+                    let range_options = self.pop_range_options(t);
 
-                //     let range_options = self.pop_range_options(t);
+                    let mut prefix = None;
+                    if op.as_str() == "GET_RANGE_SELECTOR" {
+                        prefix = Some(
+                            if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                                b
+                            } else {
+                                panic!(
+                                    "NonFutureStackEntryItem::Bytes was expected, but not found"
+                                );
+                            },
+                        );
+                    }
 
-                //     let mut prefix = None;
-                //     if op.as_str() == "GET_RANGE_SELECTOR" {
-                //         prefix = Some(
-                //             if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                //                 b
-                //             } else {
-                //                 panic!(
-                //                     "NonFutureStackEntryItem::Bytes was expected, but not found"
-                //                 );
-                //             },
-                //         );
-                //     }
+                    match rt.read(|tr| {
+                        Ok(tr
+                            .get_range(
+                                begin_key_selector.clone(),
+                                end_key_selector.clone(),
+                                range_options.clone(),
+                            )
+                            .get()?)
+                    }) {
+                        Ok(kvs) => {
+                            let mut res = Tuple::new();
 
-                //     let kvs = rt
-                //         .read(|tr| {
-                //             Ok(tr
-                //                 .get_range(
-                //                     begin_key_selector.clone(),
-                //                     end_key_selector.clone(),
-                //                     range_options.clone(),
-                //                 )
-                //                 .get()?)
-                //         })
-                //         .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
+                            for kv in kvs {
+                                if let Some(ref p) = prefix {
+                                    // GET_RANGE_SELECTOR
+                                    if bytes_util::starts_with(
+                                        kv.get_key().clone().into(),
+                                        p.clone(),
+                                    ) {
+                                        res.add_bytes(kv.get_key().clone().into());
+                                        res.add_bytes(kv.get_value().clone().into());
+                                    }
+                                } else {
+                                    // GET_RANGE, GET_RANGE_STARTS_WITH
+                                    res.add_bytes(kv.get_key().clone().into());
+                                    res.add_bytes(kv.get_value().clone().into());
+                                }
+                            }
 
-                //     let mut res = Tuple::new();
-
-                //     for kv in kvs {
-                //         if let Some(ref p) = prefix {
-                //             // GET_RANGE_SELECTOR
-                //             if bytes_util::starts_with(kv.get_key().clone().into(), p.clone()) {
-                //                 res.add_bytes(kv.get_key().clone().into());
-                //                 res.add_bytes(kv.get_value().clone().into());
-                //             }
-                //         } else {
-                //             // GET_RANGE, GET_RANGE_STARTS_WITH
-                //             res.add_bytes(kv.get_key().clone().into());
-                //             res.add_bytes(kv.get_value().clone().into());
-                //         }
-                //     }
-
-                //     self.store(inst_number, StackEntryItem::Bytes(res.pack()));
-                // }
+                            self.store(inst_number, StackEntryItem::Bytes(res.pack()));
+                        }
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
                 // // mutations, database_mutations
                 // "CLEAR" => {
                 //     let key = Into::<Key>::into(
@@ -1551,6 +1568,8 @@ impl StackMachine {
         }
 
         if self.verbose || verbose_inst_range {
+            println!("last_version: {:?}", self.last_version);
+            println!("tr_map: {:?}", self.tr_map);
             println!("        to [");
             self.dump_stack();
             println!(" ] ({})\n", self.stack.len());
