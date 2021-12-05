@@ -15,7 +15,7 @@ use fdb::transaction::{
     TransactionContext,
 };
 use fdb::tuple::{bytes_util, Tuple, Versionstamp};
-use fdb::{self, Key, KeySelector, Value};
+use fdb::{self, Key, KeySelector, KeyValue, Value};
 
 // This code is automatically generated, so we can ignore the
 // warnings.
@@ -46,7 +46,7 @@ use std::mem;
 use std::ops::Range as OpsRange;
 use std::sync::Arc;
 
-const VERBOSE: bool = true;
+const VERBOSE: bool = false;
 const VERBOSE_INST_RANGE: Option<OpsRange<usize>> = None;
 const VERBOSE_INST_ONLY: bool = false;
 
@@ -555,33 +555,31 @@ impl StackMachine {
         self.store(inst_number, item);
     }
 
-    // This function mutates the database and does not use the global
-    // transaction map. In Go, it uses `Transact` method, which is on
-    // `Database` type.
-    //
-    // In our case, we will use `self.db`. If we don't do this, then
-    // multiple mutations will try to use the same transaction. After
-    // the first mutation (for example `SET` operation) finishes, the
-    // second mutation (for example another `SET` operation) would
-    // fail with error code 2017 (Operation issued while a commit was
-    // outstanding).
-    //
-    // It is also possible that `run` might fail, in which case we
-    // push an error onto the stack.
-    fn execute_mutation<'transaction, T, F>(&mut self, f: F, is_database: bool, inst_number: usize)
-    where
+    fn execute_mutation<T, F>(
+        &mut self,
+        f: F,
+        tr: &FdbTransaction,
+        is_database: bool,
+        inst_number: usize,
+    ) where
         F: Fn(&dyn Transaction<Database = FdbDatabase>) -> FdbResult<T>,
     {
-        match self.db.run(f) {
-            Ok(_) => {
-                if is_database {
+        if is_database {
+            match self.db.run(f) {
+                Ok(_) => {
+                    // We do this to simulate "_DATABASE may
+                    // optionally push a future onto the stack".
                     self.store(
                         inst_number,
                         StackEntryItem::Bytes(Bytes::from_static(&b"RESULT_NOT_PRESENT"[..])),
                     );
                 }
+                Err(err) => self.push_err(inst_number, err),
             }
-            Err(err) => self.push_err(inst_number, err),
+        } else {
+            if let Err(err) = tr.run(f) {
+                self.push_err(inst_number, err);
+            }
         }
     }
 
@@ -725,30 +723,30 @@ impl StackMachine {
     }
 
     fn run(&mut self) {
-        for (inst_number, inst) in [
-            // setup `last_version` to some good value
-            "NEW_TRANSACTION",
-            "GET_READ_VERSION",
-            "COMMIT",
-            "WAIT_FUTURE",
-            // minimal
-            "NEW_TRANSACTION",
-            "COMMIT",
-            "WAIT_FUTURE",
-            "GET_COMMITTED_VERSION",
-            "RESET",
-            "SET_READ_VERSION",
-            "CANCEL",
-            "GET_READ_VERSION",
-        ]
-        .iter()
-        .map(|x| {
-            let mut t = Tuple::new();
-            t.add_string(x.to_string());
-            t
-        })
-        .enumerate()
-        {
+        let kvs = self
+            .db
+            .read(|tr| {
+                let ops_range = {
+                    let mut t = Tuple::new();
+                    t.add_bytes(self.prefix.clone().into());
+                    t
+                }
+                .range(Bytes::new());
+
+                Ok(tr
+                    .get_range(
+                        KeySelector::first_greater_or_equal(ops_range.begin().clone().into()),
+                        KeySelector::first_greater_or_equal(ops_range.end().clone().into()),
+                        RangeOptions::default(),
+                    )
+                    .get()?)
+            })
+            .unwrap_or_else(|err| panic!("Error occurred during `read`: {:?}", err));
+
+        for (inst_number, kv) in kvs.into_iter().enumerate() {
+            let inst = Tuple::from_bytes(kv.get_value().clone().into()).unwrap_or_else(|err| {
+                panic!("Error occurred during `Tuple::from_bytes`: {:?}", err)
+            });
             self.process_inst(inst_number, inst);
         }
     }
@@ -767,8 +765,6 @@ impl StackMachine {
             println!("Stack from [");
             self.dump_stack();
             println!(" ] ({})", self.stack.len());
-            println!("tr_map: {:?}", self.tr_map);
-            println!("last_version: {:?}", self.last_version);
             println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
         } else if VERBOSE_INST_ONLY {
             println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
@@ -781,45 +777,25 @@ impl StackMachine {
         if op.as_str() == "NEW_TRANSACTION" {
             self.new_transaction()
         } else {
-            // When working on `_DATABASE` operations, store the
-            // `FdbTransaction` value here.
-            let mut database_fdb_transaction = None;
-
             // In the Go bindings, there is no `is_snapshot`.
             let mut is_snapshot = false;
             let mut is_database = false;
 
-            // Tie the lifetime of transaction to this variable on the
-            // stack. We need to do this hackery because we don't what
-            // `'self` to get immutably borrowed because of
+            // Tie the lifetime of transaction to this variable.  We
+            // need to do this hackery because we don't what `'self`
+            // to get immutably borrowed because of
             // `self.current_transaction`.
             let current_transaction_lifetime = ();
 
-            let t;
-            let rt;
+            let tr = self.current_transaction(&current_transaction_lifetime);
+            let tr_snap = tr.snapshot();
 
             if op.ends_with("_SNAPSHOT") {
-                t = self.current_transaction(&current_transaction_lifetime);
-
-                rt = t.snapshot();
-
                 op.drain((op.len() - 9)..);
-
                 is_snapshot = true;
             } else if op.ends_with("_DATABASE") {
-                database_fdb_transaction =
-                    Some(self.db.create_transaction().unwrap_or_else(|err| {
-                        panic!("Error occurred during `create_transaction`: {:?}", err);
-                    }));
-                t = database_fdb_transaction.as_ref().unwrap();
-                rt = t.snapshot();
-
                 op.drain((op.len() - 9)..);
-
                 is_database = true;
-            } else {
-                t = self.current_transaction(&current_transaction_lifetime);
-                rt = t.snapshot();
             }
 
             match op.as_str() {
@@ -928,9 +904,14 @@ impl StackMachine {
                 // operations in the spec, we have a classification in the
                 // `api.py` test generator [2].
                 //
+                // (TODO document the order)
+                //
                 // Following order is followed.
                 // - resets
                 // - tuples
+                // - versions, snapshot_versions
+                // - reads, snapshot_reads, database_reads
+                // - mutations, database_mutations
                 //
                 // `NEW_TRANSACTION` is taken care of at the beginning
                 // of this function.
@@ -939,7 +920,7 @@ impl StackMachine {
                 // [2]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/tests/api.py#L143-L174
                 "USE_TRANSACTION" => {
                     let tr_name =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -961,7 +942,7 @@ impl StackMachine {
                         // use that.
                         inst_number: i,
                         item,
-                    } = self.wait_and_pop(t);
+                    } = self.wait_and_pop(tr);
 
                     self.store(i, StackMachine::to_stack_entry_item(item));
                 }
@@ -969,7 +950,7 @@ impl StackMachine {
                 "ON_ERROR" => {
                     let fdb_error = FdbError::new(
                         i32::try_from(
-                            if let NonFutureStackEntryItem::BigInt(b) = self.wait_and_pop(t).item {
+                            if let NonFutureStackEntryItem::BigInt(b) = self.wait_and_pop(tr).item {
                                 b
                             } else {
                                 panic!(
@@ -984,6 +965,10 @@ impl StackMachine {
                             )
                         }),
                     );
+                    // We are just pushing the future here, and
+                    // letting the `WAIT_FUTURE` instruction take care
+                    // of `join`-ing and indicating
+                    // `RESULT_NOT_PRESENT` or `ERROR`.
                     self.store(
                         inst_number,
                         StackEntryItem::FdbFutureUnit(FdbFuture::into_raw(unsafe {
@@ -992,47 +977,41 @@ impl StackMachine {
                         })),
                     );
                 }
-                "RESET" =>
-                // TODO
-                //
                 // In Java bindings, this is `self.new_transaction()`,
                 // but Go bindings uses `reset()` on the transaction.
-                unsafe {
+                "RESET" => unsafe {
                     self.current_transaction(&current_transaction_lifetime)
-                        .reset()
-                }
-                "CANCEL" =>
-                // TODO
-                unsafe {
+                        .reset();
+                },
+                "CANCEL" => unsafe {
                     self.current_transaction(&current_transaction_lifetime)
-                        .cancel()
-                }
-
+                        .cancel();
+                },
                 // Take care of `GET_READ_VERSION`, `SET`, `ATOMIC_OP` here as it
                 // is one of the first APIs that is needed for binding
                 // tester to work.
-                "GET_READ_VERSION" => {
-                    // If it is a `GET_READ_VERSION` then, `rt` would
-                    // be `.snapshot()`.
-                    //
-                    // It is also possible that `read` might fail
-                    // (error code 1025), in which case we push an
-                    // error onto the stack.
-                    match rt.read(|rtr| Ok(unsafe { rtr.get_read_version() }.join()?)) {
-                        Ok(last_version) => {
-                            self.last_version = last_version;
-
-                            self.store(
-                                inst_number,
-                                StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
-                            );
-                        }
-                        Err(err) => self.push_err(inst_number, err),
+                "GET_READ_VERSION" => match unsafe {
+                    if is_snapshot {
+                        tr_snap.get_read_version()
+                    } else {
+                        tr.get_read_version()
                     }
                 }
+                .join()
+                {
+                    Ok(last_version) => {
+                        self.last_version = last_version;
+
+                        self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"GOT_READ_VERSION"[..])),
+                        );
+                    }
+                    Err(err) => self.push_err(inst_number, err),
+                },
                 "SET" => {
                     let key = Into::<Key>::into(
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1040,7 +1019,7 @@ impl StackMachine {
                     );
 
                     let value = Into::<Value>::into(
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1048,10 +1027,11 @@ impl StackMachine {
                     );
 
                     self.execute_mutation(
-                        |tr| {
-                            tr.set(key.clone(), value.clone());
+                        |t| {
+                            t.set(key.clone(), value.clone());
                             Ok(())
                         },
+                        tr,
                         is_database,
                         inst_number,
                     );
@@ -1059,7 +1039,7 @@ impl StackMachine {
                 "ATOMIC_OP" => {
                     // `OPTYPE` is a string, while `KEY` and `VALUE` are bytes.
                     let op_name =
-                        if let NonFutureStackEntryItem::String(s) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::String(s) = self.wait_and_pop(tr).item {
                             s
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1068,27 +1048,28 @@ impl StackMachine {
                     let mutation_type = StackMachine::from_mutation_type_string(op_name);
 
                     let key = Into::<Key>::into(
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
                         },
                     );
 
-                    let param = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item
-                    {
-                        b
-                    } else {
-                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                    };
+                    let param =
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        };
 
                     self.execute_mutation(
-                        |tr| {
+                        |t| {
                             unsafe {
-                                tr.mutate(mutation_type, key.clone(), param.clone());
+                                t.mutate(mutation_type, key.clone(), param.clone());
                             }
                             Ok(())
                         },
+                        tr,
                         is_database,
                         inst_number,
                     );
@@ -1102,7 +1083,7 @@ impl StackMachine {
                 // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/tests/api.py#L153
                 "TUPLE_PACK" => {
                     let count = usize::try_from(
-                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(tr).item {
                             bi
                         } else {
                             panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
@@ -1117,7 +1098,7 @@ impl StackMachine {
                     for _ in 0..count {
                         // `add_bigint` code internally uses
                         // `add_i64`, `add_i32`, `add_i16, `add_i8`.
-                        match self.wait_and_pop(t).item {
+                        match self.wait_and_pop(tr).item {
                             NonFutureStackEntryItem::BigInt(bi) => res.add_bigint(bi),
                             NonFutureStackEntryItem::Bool(b) => res.add_bool(b),
                             NonFutureStackEntryItem::Bytes(b) => res.add_bytes(b),
@@ -1135,14 +1116,14 @@ impl StackMachine {
                 }
                 "TUPLE_PACK_WITH_VERSIONSTAMP" => {
                     let prefix =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
                         };
 
                     let count = usize::try_from(
-                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(tr).item {
                             bi
                         } else {
                             panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
@@ -1157,7 +1138,7 @@ impl StackMachine {
                     for _ in 0..count {
                         // `add_bigint` code internally uses
                         // `add_i64`, `add_i32`, `add_i16, `add_i8`.
-                        match self.wait_and_pop(t).item {
+                        match self.wait_and_pop(tr).item {
                             NonFutureStackEntryItem::BigInt(bi) => res.add_bigint(bi),
                             NonFutureStackEntryItem::Bool(b) => res.add_bool(b),
                             NonFutureStackEntryItem::Bytes(b) => res.add_bytes(b),
@@ -1195,7 +1176,7 @@ impl StackMachine {
                 }
                 "TUPLE_UNPACK" => {
                     let packed_tuple = Tuple::from_bytes(
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1249,7 +1230,7 @@ impl StackMachine {
                 }
                 "TUPLE_RANGE" => {
                     let count = usize::try_from(
-                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(tr).item {
                             bi
                         } else {
                             panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
@@ -1264,7 +1245,7 @@ impl StackMachine {
                     for _ in 0..count {
                         // `add_bigint` code internally uses
                         // `add_i64`, `add_i32`, `add_i16, `add_i8`.
-                        match self.wait_and_pop(t).item {
+                        match self.wait_and_pop(tr).item {
                             NonFutureStackEntryItem::BigInt(bi) => res_tup.add_bigint(bi),
                             NonFutureStackEntryItem::Bool(b) => res_tup.add_bool(b),
                             NonFutureStackEntryItem::Bytes(b) => res_tup.add_bytes(b),
@@ -1291,7 +1272,7 @@ impl StackMachine {
                 }
                 "TUPLE_SORT" => {
                     let mut count = usize::try_from(
-                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::BigInt(bi) = self.wait_and_pop(tr).item {
                             bi
                         } else {
                             panic!("NonFutureStackEntryItem::BigInt was expected, but not found");
@@ -1307,7 +1288,7 @@ impl StackMachine {
                         } else {
                             count -= 1;
                             Some(Tuple::from_bytes(
-			    if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item
+			    if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item
 			    {
 				b
 			    } else {
@@ -1321,7 +1302,7 @@ impl StackMachine {
                 }
                 "ENCODE_FLOAT" => {
                     let val_bytes =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1333,7 +1314,7 @@ impl StackMachine {
                 }
                 "ENCODE_DOUBLE" => {
                     let val_bytes =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
@@ -1344,7 +1325,8 @@ impl StackMachine {
                     self.store(inst_number, StackEntryItem::Double(val));
                 }
                 "DECODE_FLOAT" => {
-                    let val = if let NonFutureStackEntryItem::Float(f) = self.wait_and_pop(t).item {
+                    let val = if let NonFutureStackEntryItem::Float(f) = self.wait_and_pop(tr).item
+                    {
                         f
                     } else {
                         panic!("NonFutureStackEntryItem::Float was expected, but not found");
@@ -1359,7 +1341,7 @@ impl StackMachine {
                     self.store(inst_number, StackEntryItem::Bytes(val_bytes));
                 }
                 "DECODE_DOUBLE" => {
-                    let val = if let NonFutureStackEntryItem::Double(d) = self.wait_and_pop(t).item
+                    let val = if let NonFutureStackEntryItem::Double(d) = self.wait_and_pop(tr).item
                     {
                         d
                     } else {
@@ -1375,6 +1357,9 @@ impl StackMachine {
                     self.store(inst_number, StackEntryItem::Bytes(val_bytes));
                 }
                 // versions, snapshot_versions
+                //
+                // `GET_READ_VERSION` and `GET_READ_VERSION_SNAPSHOT`
+                // is take care of above.
                 "SET_READ_VERSION" => unsafe {
                     self.current_transaction(&current_transaction_lifetime)
                         .set_read_version(self.last_version)
@@ -1393,43 +1378,65 @@ impl StackMachine {
                     );
                 }
                 // reads, snapshot_reads, database_reads
-                //
-                // TODO: removed other tests to see if can track down
-                // the "on_error" error incuding tuple
                 "GET" => {
-                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item
+                    {
                         b
                     } else {
                         panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
                     };
 
-                    // In Java and Go bindings, it is possible to leak a
-                    // future from the closure. We do not allow this
-                    // pattern in our bindings. So, we resolve the future
-                    // within the closure.
-                    match rt.read(|tr| Ok(tr.get(key.clone().into()).join()?)) {
-                        Ok(value) => {
-                            let item = StackEntryItem::Bytes(
-                                value
-                                    .map(|v| v.into())
-                                    .unwrap_or_else(|| Bytes::from(&b"RESULT_NOT_PRESENT"[..])),
-                            );
-                            self.store(inst_number, item);
+                    // Only push future onto the stack for `GET` and
+                    // `GET_SNAPSHOT`.
+                    if is_database {
+                        match self.db.read(|rtr| Ok(rtr.get(key.clone().into()).join()?)) {
+                            Ok(value) => {
+                                let item =
+                                    StackEntryItem::Bytes(value.map(|v| v.into()).unwrap_or_else(
+                                        || Bytes::from(&b"RESULT_NOT_PRESENT"[..]),
+                                    ));
+                                self.store(inst_number, item);
+                            }
+                            Err(err) => self.push_err(inst_number, err),
                         }
-                        Err(err) => self.push_err(inst_number, err),
+                    } else {
+                        let item =
+                            StackEntryItem::FdbFutureMaybeValue(FdbFuture::into_raw(unsafe {
+                                if is_snapshot {
+                                    tr_snap.get(key.into())
+                                } else {
+                                    tr_snap.get(key.into())
+                                }
+                            }));
+
+                        self.store(inst_number, item);
                     }
                 }
                 "GET_KEY" => {
-                    let sel = self.pop_selector(t);
+                    let sel = self.pop_selector(tr);
 
                     let prefix =
-                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                             b
                         } else {
                             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
                         };
 
-                    match rt.read(|tr| Ok(tr.get_key(sel.clone()).join()?)) {
+                    // We don't push future onto the stack. This is
+                    // because we'll then have to deal with the
+                    // `RESULT` logic in `wait_and_pop`. Instead we
+                    // just `join` and deal with the `RESULT` logic
+                    // here.
+
+                    let fn_closure = |t: &dyn ReadTransaction| Ok(t.get_key(sel.clone()).join()?);
+
+                    match if is_database {
+                        self.db.read(fn_closure)
+                    } else if is_snapshot {
+                        tr_snap.read(fn_closure)
+                    } else {
+                        tr.read(fn_closure)
+                    } {
                         Ok(kb) => {
                             let key_bytes = Bytes::from(kb);
 
@@ -1457,20 +1464,20 @@ impl StackMachine {
                 "GET_RANGE" | "GET_RANGE_STARTS_WITH" | "GET_RANGE_SELECTOR" => {
                     let (begin_key_selector, end_key_selector) = match op.as_str() {
                         "GET_RANGE_STARTS_WITH" => {
-                            let prefix_range = self.pop_prefix_range(t);
+                            let prefix_range = self.pop_prefix_range(tr);
                             (
                                 KeySelector::first_greater_or_equal(prefix_range.begin().clone()),
                                 KeySelector::first_greater_or_equal(prefix_range.end().clone()),
                             )
                         }
                         "GET_RANGE_SELECTOR" => {
-                            let begin_ks = self.pop_selector(t);
-                            let end_ks = self.pop_selector(t);
+                            let begin_ks = self.pop_selector(tr);
+                            let end_ks = self.pop_selector(tr);
                             (begin_ks, end_ks)
                         }
                         _ => {
                             // GET_RANGE
-                            let key_range = self.pop_key_range(t);
+                            let key_range = self.pop_key_range(tr);
                             (
                                 KeySelector::first_greater_or_equal(key_range.begin().clone()),
                                 KeySelector::first_greater_or_equal(key_range.end().clone()),
@@ -1478,12 +1485,12 @@ impl StackMachine {
                         }
                     };
 
-                    let range_options = self.pop_range_options(t);
+                    let range_options = self.pop_range_options(tr);
 
                     let mut prefix = None;
                     if op.as_str() == "GET_RANGE_SELECTOR" {
                         prefix = Some(
-                            if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
+                            if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
                                 b
                             } else {
                                 panic!(
@@ -1493,15 +1500,22 @@ impl StackMachine {
                         );
                     }
 
-                    match rt.read(|tr| {
-                        Ok(tr
-                            .get_range(
-                                begin_key_selector.clone(),
-                                end_key_selector.clone(),
-                                range_options.clone(),
-                            )
-                            .get()?)
-                    }) {
+                    let fn_closure = |t: &dyn ReadTransaction| -> FdbResult<Vec<KeyValue>> {
+                        Ok(t.get_range(
+                            begin_key_selector.clone(),
+                            end_key_selector.clone(),
+                            range_options.clone(),
+                        )
+                        .get()?)
+                    };
+
+                    match if is_database {
+                        self.db.read(fn_closure)
+                    } else if is_snapshot {
+                        tr_snap.read(fn_closure)
+                    } else {
+                        tr.read(fn_closure)
+                    } {
                         Ok(kvs) => {
                             let mut res = Tuple::new();
 
@@ -1527,49 +1541,88 @@ impl StackMachine {
                         Err(err) => self.push_err(inst_number, err),
                     }
                 }
-                // // mutations, database_mutations
-                // "CLEAR" => {
-                //     let key = Into::<Key>::into(
-                //         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(t).item {
-                //             b
-                //         } else {
-                //             panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-                //         },
-                //     );
+                // mutations, database_mutations
+                //
+                // `SET` and `ATOMIC_OP` is taken care of above. Even
+                // though mutations has `VERSIONSTAMP`, there is no
+                // instruction with that name.
+                "CLEAR" => {
+                    let key = Into::<Key>::into(
+                        if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
+                            b
+                        } else {
+                            panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                        },
+                    );
 
-                //     self.execute_mutation(
-                //         |tr| {
-                //             tr.clear(key.clone());
-                //             Ok(())
-                //         },
-                //         is_database,
-                //         inst_number,
-                //     );
-                // }
-                // "CLEAR_RANGE" | "CLEAR_RANGE_STARTS_WITH" => {
-                //     let exact_range = if op.as_str() == "CLEAR_RANGE_STARTS_WITH" {
-                //         self.pop_prefix_range(t)
-                //     } else {
-                //         // CLEAR_RANGE
-                //         self.pop_key_range(t)
-                //     };
+                    self.execute_mutation(
+                        |t| {
+                            t.clear(key.clone());
+                            Ok(())
+                        },
+                        tr,
+                        is_database,
+                        inst_number,
+                    );
+                }
+                "CLEAR_RANGE" | "CLEAR_RANGE_STARTS_WITH" => {
+                    let exact_range = if op.as_str() == "CLEAR_RANGE_STARTS_WITH" {
+                        self.pop_prefix_range(tr)
+                    } else {
+                        // CLEAR_RANGE
+                        self.pop_key_range(tr)
+                    };
 
-                //     self.execute_mutation(
-                //         |tr| {
-                //             tr.clear_range(exact_range.clone());
-                //             Ok(())
-                //         },
-                //         is_database,
-                //         inst_number,
-                //     );
-                // }
+                    self.execute_mutation(
+                        |t| {
+                            t.clear_range(exact_range.clone());
+                            Ok(())
+                        },
+                        tr,
+                        is_database,
+                        inst_number,
+                    );
+                }
+                // read_conflicts
+                "READ_CONFLICT_RANGE" => {
+                    let key_range = self.pop_key_range(tr);
+
+                    match self
+                        .current_transaction(&current_transaction_lifetime)
+                        .add_read_conflict_range(key_range)
+                    {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"SET_CONFLICT_RANGE"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
+                "READ_CONFLICT_KEY" => {
+                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item
+                    {
+                        b
+                    } else {
+                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                    }
+                    .into();
+
+                    match self
+                        .current_transaction(&current_transaction_lifetime)
+                        .add_read_conflict_key(key)
+                    {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"SET_CONFLICT_KEY"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
                 _ => panic!("Unhandled operation {}", op),
             }
         }
 
         if self.verbose || verbose_inst_range {
-            println!("last_version: {:?}", self.last_version);
-            println!("tr_map: {:?}", self.tr_map);
             println!("        to [");
             self.dump_stack();
             println!(" ] ({})\n", self.stack.len());

@@ -94,28 +94,7 @@ impl ReadTransactionContext for FdbTransaction {
         Self: Sized,
         F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
     {
-        loop {
-            let ret_val = f(self);
-
-            // Closure returned an error
-            if let Err(e) = ret_val {
-                if FdbError::layer_error(e.code()) {
-                    // Check if it is a layer error. If so, just
-                    // return it.
-                    return Err(e);
-                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
-                    // Check if `on_error` returned an error. This
-                    // means we have a non-retryable error.
-                    return Err(e1);
-                } else {
-                    continue;
-                }
-            }
-
-            // We don't need to commit read transaction, return
-            // `Ok(T)`
-            return ret_val;
-        }
+	f(self)
     }
 }
 
@@ -254,40 +233,7 @@ impl TransactionContext for FdbTransaction {
         Self: Sized,
         F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
     {
-        loop {
-            let ret_val = f(self);
-
-            // Closure returned an error.
-            if let Err(e) = ret_val {
-                if FdbError::layer_error(e.code()) {
-                    // Check if it is a layer error. If so, just
-                    // return it.
-                    return Err(e);
-                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
-                    // Check if `on_error` returned an error. This
-                    // means we have a non-retryable error.
-                    return Err(e1);
-                } else {
-                    continue;
-                }
-            }
-
-            // No error from closure. Attempt to commit the
-            // transaction.
-            if let Err(e) = unsafe { self.commit() }.join() {
-                // Commit returned an error
-                if let Err(e1) = unsafe { self.on_error(e) }.join() {
-                    // Check if `on_error` returned an error. This
-                    // means we have a non-retryable error.
-                    return Err(e1);
-                } else {
-                    continue;
-                }
-            }
-
-            // Commit successful, return `Ok(T)`
-            return ret_val;
-        }
+	f(self)
     }
 
     fn run_and_get_versionstamp<T, F>(&self, f: F) -> FdbResult<(T, Bytes)>
@@ -663,37 +609,6 @@ struct ReadSnapshot {
     c_ptr: *mut fdb_sys::FDBTransaction,
 }
 
-impl ReadTransactionContext for ReadSnapshot {
-    fn read<T, F>(&self, f: F) -> FdbResult<T>
-    where
-        Self: Sized,
-        F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
-    {
-        loop {
-            let ret_val = f(self);
-
-            // Closure returned an error
-            if let Err(e) = ret_val {
-                if FdbError::layer_error(e.code()) {
-                    // Check if it is a layer error. If so, just
-                    // return it.
-                    return Err(e);
-                } else if let Err(e1) = unsafe { self.on_error(e) }.join() {
-                    // Check if `on_error` returned an error. This
-                    // means we have a non-retryable error.
-                    return Err(e1);
-                } else {
-                    continue;
-                }
-            }
-
-            // We don't need to commit read transaction, return
-            // `Ok(T)`
-            return ret_val;
-        }
-    }
-}
-
 impl ReadTransaction for ReadSnapshot {
     fn add_read_conflict_key_if_not_snapshot(&self, _key: Key) -> FdbResult<()> {
         // return error, as this is a snapshot
@@ -930,7 +845,6 @@ mod tests {
         assert!(impls!(
 	    ReadSnapshot:
 	        ReadTransaction &
-	        ReadTransactionContext &
 		!Drop &
 		!Copy &
 		!Clone &
