@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use dashmap::DashMap;
 
-use fdb::database::{Database, FdbDatabase};
+use fdb::database::{Database, DatabaseOption, FdbDatabase};
 use fdb::error::{
     FdbError, FdbResult, TUPLE_PACK_WITH_VERSIONSTAMP_MULTIPLE_FOUND,
     TUPLE_PACK_WITH_VERSIONSTAMP_NOT_FOUND,
@@ -12,7 +12,7 @@ use fdb::range::{Range, RangeOptions, StreamingMode};
 use fdb::subspace::Subspace;
 use fdb::transaction::{
     FdbTransaction, MutationType, ReadTransaction, ReadTransactionContext, Transaction,
-    TransactionContext,
+    TransactionContext, TransactionOption,
 };
 use fdb::tuple::{bytes_util, Tuple, Versionstamp};
 use fdb::{self, Key, KeySelector, KeyValue, Value};
@@ -45,6 +45,8 @@ use std::iter;
 use std::mem;
 use std::ops::Range as OpsRange;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 const VERBOSE: bool = false;
 const VERBOSE_INST_RANGE: Option<OpsRange<usize>> = None;
@@ -305,6 +307,42 @@ impl StackMachine {
         }
     }
 
+    // From the spec [1]
+    //
+    // An operation may have a second element which provides
+    // additional data, which may be of any tuple type.
+    //
+    // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#overview
+    fn get_additional_inst_data(inst: &Tuple) -> StackEntryItem {
+        inst.get_bigint(1)
+            .map(|b| StackEntryItem::BigInt(b))
+            .or(inst.get_bool(1).map(|b| StackEntryItem::Bool(b)))
+            .or(inst
+                .get_bytes_ref(1)
+                .map(|b| StackEntryItem::Bytes(b.clone())))
+            .or(inst.get_f32(1).map(|f| StackEntryItem::Float(f)))
+            .or(inst.get_f64(1).map(|f| StackEntryItem::Double(f)))
+            .or(inst.get_null(1).map(|_| StackEntryItem::Null))
+            .or(inst
+                .get_string_ref(1)
+                .map(|s| StackEntryItem::String(s.clone())))
+            .or(inst
+                .get_tuple_ref(1)
+                .map(|t| StackEntryItem::Tuple(t.clone())))
+            .or(inst
+                .get_uuid_ref(1)
+                .map(|u| StackEntryItem::Uuid(u.clone())))
+            .or(inst
+                .get_versionstamp_ref(1)
+                .map(|v| StackEntryItem::Versionstamp(v.clone())))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Error occurred during `instruction_additonal_data`: {:?}",
+                    err
+                )
+            })
+    }
+
     fn wait_and_pop<'transaction>(
         &mut self,
         transaction: &'transaction FdbTransaction,
@@ -543,6 +581,256 @@ impl StackMachine {
         Range::starts_with(prefix_key)
     }
 
+    fn test_db_options(&self) {
+        self.db
+            .set_option(DatabaseOption::LocationCacheSize(100001))
+            .and_then(|_| self.db.set_option(DatabaseOption::MaxWatches(10001)))
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::DatacenterId("dc_id".to_string()))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::MachineId("machine_id".to_string()))
+            })
+            .and_then(|_| self.db.set_option(DatabaseOption::SnapshotRywEnable))
+            .and_then(|_| self.db.set_option(DatabaseOption::SnapshotRywDisable))
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionLoggingMaxFieldLength(1000))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionTimeout(100000))
+            })
+            .and_then(|_| self.db.set_option(DatabaseOption::TransactionTimeout(0)))
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionMaxRetryDelay(100))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionSizeLimit(100000))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionRetryLimit(10))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionRetryLimit(-1))
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionCausalReadRisky)
+            })
+            .and_then(|_| {
+                self.db
+                    .set_option(DatabaseOption::TransactionIncludePortInAddress)
+            })
+            .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+    }
+
+    fn test_tr_options(&self) {
+        self.db
+            .run(|t| {
+                t.set_option(TransactionOption::PrioritySystemImmediate)?;
+                t.set_option(TransactionOption::PriorityBatch)?;
+                t.set_option(TransactionOption::CausalReadRisky)?;
+                t.set_option(TransactionOption::CausalWriteRisky)?;
+                t.set_option(TransactionOption::ReadYourWritesDisable)?;
+                t.set_option(TransactionOption::ReadSystemKeys)?;
+                t.set_option(TransactionOption::AccessSystemKeys)?;
+                t.set_option(TransactionOption::TransactionLoggingMaxFieldLength(1000))?;
+                t.set_option(TransactionOption::Timeout(60 * 1000))?;
+                t.set_option(TransactionOption::RetryLimit(50))?;
+                t.set_option(TransactionOption::MaxRetryDelay(100))?;
+                t.set_option(TransactionOption::UsedDuringCommitProtectionDisable)?;
+                t.set_option(TransactionOption::DebugTransactionIdentifier(
+                    "my_transaction".to_string(),
+                ))?;
+                t.set_option(TransactionOption::LogTransaction)?;
+                t.set_option(TransactionOption::ReadLockAware)?;
+                t.set_option(TransactionOption::LockAware)?;
+                t.set_option(TransactionOption::IncludePortInAddress)?;
+
+                t.get(Bytes::from(&b"\xFF"[..]).into()).join()?;
+
+                Ok(())
+            })
+            .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+    }
+
+    fn check_watches<'transaction>(
+        &self,
+        watches: Vec<FdbFuture<'transaction, ()>>,
+        expected: bool,
+    ) -> (Vec<FdbFuture<'transaction, ()>>, bool) {
+        let mut ret_watches = Vec::new();
+
+        // When returning `false`, just accumulate rest of the futures
+        // using this flag.
+        let mut false_to_be_returned = false;
+
+        for (i, w) in watches.into_iter().enumerate() {
+            if false_to_be_returned {
+                ret_watches.push(w);
+            } else if w.is_ready() || expected {
+                match w.join() {
+                    Ok(_) => {
+                        if !expected {
+                            panic!("Watch {} triggered too early", i);
+                        }
+                    }
+                    Err(err) => {
+                        let tr = self.db.create_transaction().unwrap_or_else(|err| {
+                            panic!("Error occurred during `create_transaction`: {:?}", err)
+                        });
+
+                        unsafe { tr.on_error(err) }.join().unwrap_or_else(|err| {
+                            panic!("Error occurred during `on_error`: {:?}", err)
+                        });
+
+                        false_to_be_returned = true;
+                    }
+                }
+            } else {
+                ret_watches.push(w);
+            }
+        }
+
+        (ret_watches, if false_to_be_returned { false } else { true })
+    }
+
+    fn test_watches(&self) {
+        loop {
+            self.db
+                .run(|t| {
+                    t.set(
+                        Bytes::from(&b"w0"[..]).into(),
+                        Bytes::from(&b"0"[..]).into(),
+                    );
+                    t.set(
+                        Bytes::from(&b"w2"[..]).into(),
+                        Bytes::from(&b"2"[..]).into(),
+                    );
+                    t.set(
+                        Bytes::from(&b"w3"[..]).into(),
+                        Bytes::from(&b"3"[..]).into(),
+                    );
+                    Ok(())
+                })
+                .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+
+            let (watches, boxed_tr) = self
+                .db
+                .clone()
+                .run_and_get_transaction(|t| {
+                    let mut watches = Vec::new();
+
+                    watches.push(FdbFuture::into_raw(t.watch(Bytes::from(&b"w0"[..]).into())));
+                    watches.push(FdbFuture::into_raw(t.watch(Bytes::from(&b"w1"[..]).into())));
+                    watches.push(FdbFuture::into_raw(t.watch(Bytes::from(&b"w2"[..]).into())));
+                    watches.push(FdbFuture::into_raw(t.watch(Bytes::from(&b"w3"[..]).into())));
+
+                    // won't trigger watch `w0` as key `w0` already
+                    // `0`
+                    t.set(
+                        Bytes::from(&b"w0"[..]).into(),
+                        Bytes::from(&b"0"[..]).into(),
+                    );
+
+                    // won't trigger watch `w1` as key `w1` is already
+                    // empty.
+                    t.clear(Bytes::from(&b"w1"[..]).into());
+
+                    Ok(watches)
+                })
+                .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+
+            thread::sleep(Duration::from_secs(5));
+
+            let unboxed_tr = *boxed_tr;
+
+            // Convert a `*mut ()` to a `FdbFuture<'t, ()>` where `'t` is
+            // tied to the lifetime of `unboxed_tr`.
+            let watches = watches
+                .into_iter()
+                .map(|f| StackMachine::get_bounded_fdb_future(&unboxed_tr, f))
+                .collect::<Vec<_>>();
+
+            let (watches, cw) = self.check_watches(watches, false);
+
+            if !cw {
+                continue;
+            }
+
+            self.db
+                .run(|t| {
+                    t.set(
+                        Bytes::from(&b"w0"[..]).into(),
+                        Bytes::from(&b"a"[..]).into(),
+                    );
+                    t.set(
+                        Bytes::from(&b"w1"[..]).into(),
+                        Bytes::from(&b"b"[..]).into(),
+                    );
+                    t.clear(Bytes::from(&b"w2"[..]).into());
+                    unsafe {
+                        t.mutate(
+                            MutationType::BitXor,
+                            Bytes::from(&b"w3"[..]).into(),
+                            Bytes::from(&b"\xFF\xFF"[..]),
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+
+            let (watches, cw) = self.check_watches(watches, true);
+
+            drop(watches);
+
+            if cw {
+                return;
+            }
+        }
+    }
+
+    fn test_locality(&self) {
+        self.db
+            .run(|t| {
+                t.set_option(TransactionOption::Timeout(60 * 1000))?;
+                t.set_option(TransactionOption::ReadSystemKeys)?;
+
+                let boundary_keys = self.db.get_boundary_keys(
+                    Bytes::from(&b""[..]).into(),
+                    Bytes::from(&b"\xFF\xFF"[..]).into(),
+                    0,
+                    0,
+                )?;
+
+                for i in 0..boundary_keys.len() - 1 {
+                    let start = boundary_keys[i].clone();
+                    let end = t
+                        .get_key(KeySelector::last_less_than(boundary_keys[i + 1].clone()))
+                        .join()?;
+
+                    let start_addresses = t.get_addresses_for_key(start).join()?;
+                    let end_addresses = t.get_addresses_for_key(end).join()?;
+
+                    for a in start_addresses.iter() {
+                        if !end_addresses.contains(a) {
+                            panic!("Locality not internally consistent.");
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+            .unwrap_or_else(|err| panic!("Unit test failed {:?}", err));
+    }
+
     // In Go bindings this is handled by `defer`.
     fn push_err(&mut self, inst_number: usize, err: FdbError) {
         let item = StackEntryItem::Bytes({
@@ -684,42 +972,6 @@ impl StackMachine {
         // in `TrMap` and is not dropped by any other thread, it will
         // eventually be garbage collected in the main thread.
         self.tr_name = tr_name;
-    }
-
-    // From the spec [1]
-    //
-    // An operation may have a second element which provides
-    // additional data, which may be of any tuple type.
-    //
-    // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#overview
-    fn get_additional_inst_data(inst: &Tuple) -> StackEntryItem {
-        inst.get_bigint(1)
-            .map(|b| StackEntryItem::BigInt(b))
-            .or(inst.get_bool(1).map(|b| StackEntryItem::Bool(b)))
-            .or(inst
-                .get_bytes_ref(1)
-                .map(|b| StackEntryItem::Bytes(b.clone())))
-            .or(inst.get_f32(1).map(|f| StackEntryItem::Float(f)))
-            .or(inst.get_f64(1).map(|f| StackEntryItem::Double(f)))
-            .or(inst.get_null(1).map(|_| StackEntryItem::Null))
-            .or(inst
-                .get_string_ref(1)
-                .map(|s| StackEntryItem::String(s.clone())))
-            .or(inst
-                .get_tuple_ref(1)
-                .map(|t| StackEntryItem::Tuple(t.clone())))
-            .or(inst
-                .get_uuid_ref(1)
-                .map(|u| StackEntryItem::Uuid(u.clone())))
-            .or(inst
-                .get_versionstamp_ref(1)
-                .map(|v| StackEntryItem::Versionstamp(v.clone())))
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Error occurred during `instruction_additonal_data`: {:?}",
-                    err
-                )
-            })
     }
 
     fn run(&mut self) {
@@ -904,20 +1156,26 @@ impl StackMachine {
                 // operations in the spec, we have a classification in the
                 // `api.py` test generator [2].
                 //
-                // (TODO document the order)
-                //
                 // Following order is followed.
-                // - resets
+		// - resets
                 // - tuples
                 // - versions, snapshot_versions
                 // - reads, snapshot_reads, database_reads
                 // - mutations, database_mutations
-                //
+		// - read_conflicts
+		// - write_conflicts
+		// - txn_sizes
+		// - storage_metrics
+		//
+		// Then we do Thread Operations [3] and Miscellaneous [4]
+		//
                 // `NEW_TRANSACTION` is taken care of at the beginning
                 // of this function.
                 //
                 // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#foundationdb-operations
                 // [2]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/tests/api.py#L143-L174
+		// [3]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#thread-operations
+		// [4]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#miscellaneous
                 "USE_TRANSACTION" => {
                     let tr_name =
                         if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
@@ -1401,13 +1659,13 @@ impl StackMachine {
                         }
                     } else {
                         let item =
-                            StackEntryItem::FdbFutureMaybeValue(FdbFuture::into_raw(unsafe {
+                            StackEntryItem::FdbFutureMaybeValue(FdbFuture::into_raw(
                                 if is_snapshot {
                                     tr_snap.get(key.into())
                                 } else {
-                                    tr_snap.get(key.into())
+                                    tr.get(key.into())
                                 }
-                            }));
+                            ));
 
                         self.store(inst_number, item);
                     }
@@ -1618,6 +1876,117 @@ impl StackMachine {
                         Err(err) => self.push_err(inst_number, err),
                     }
                 }
+		// write_conflicts
+		"WRITE_CONFLICT_RANGE" => {
+                    let key_range = self.pop_key_range(tr);
+
+                    match self
+                        .current_transaction(&current_transaction_lifetime)
+                        .add_write_conflict_range(key_range)
+                    {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"SET_CONFLICT_RANGE"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+		}
+                "WRITE_CONFLICT_KEY" => {
+                    let key = if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item
+                    {
+                        b
+                    } else {
+                        panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+                    }
+                    .into();
+
+                    match self
+                        .current_transaction(&current_transaction_lifetime)
+                        .add_write_conflict_key(key)
+                    {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"SET_CONFLICT_KEY"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+                }
+		"DISABLE_WRITE_CONFLICT" => self.current_transaction(&current_transaction_lifetime).set_option(TransactionOption::NextWriteNoWriteConflictRange)
+		    .unwrap_or_else(|err| panic!("Error occurred during `set_option(TransactionOption::NextWriteNoWriteConflictRange)`: {:?}", err)),
+		// txn_sizes
+		"GET_APPROXIMATE_SIZE" => match self
+                        .current_transaction(&current_transaction_lifetime)
+                        .get_approximate_size().join()
+                    {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"GOT_APPROXIMATE_SIZE"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+                    }
+		// storage_metrics
+		"GET_ESTIMATED_RANGE_SIZE" => {
+		    let key_range = self.pop_key_range(tr);
+
+		    match tr_snap.read(|t| Ok(t.get_estimated_range_size_bytes(key_range.clone()).join()?)) {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"GOT_ESTIMATED_RANGE_SIZE"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+		    }
+		}
+		// Thread Operations
+		"START_THREAD" => {
+		    let prefix =
+			if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
+                b
+			} else {
+			    panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
+			};
+		    tokio::spawn(stack_tester_task(StackTesterTask::new(
+			prefix,
+			self.db.clone(),
+			self.tr_map.clone(),
+			self.task_finished.clone(),
+		    )));
+		}
+		"WAIT_EMPTY" => {
+		    let prefix_range = self.pop_prefix_range(tr);
+		    let begin_key_selector = KeySelector::first_greater_or_equal(prefix_range.begin().clone());
+		    let end_key_selector = KeySelector::first_greater_or_equal(prefix_range.end().clone());
+		    match self.db.run(|t| {
+			if t.get_range(
+			    begin_key_selector.clone(),
+			    end_key_selector.clone(),
+			    RangeOptions::default()
+			).get()?.len() != 0 {
+			    Err(FdbError::new(1020))
+			} else {
+			    Ok(())
+			}
+		    }) {
+                        Ok(_) => self.store(
+                            inst_number,
+                            StackEntryItem::Bytes(Bytes::from_static(&b"WAITED_FOR_EMPTY"[..])),
+                        ),
+                        Err(err) => self.push_err(inst_number, err),
+		    }
+		}
+		// Miscellaneous
+		"UNIT_TESTS" => {
+		    self.test_db_options();
+
+		    // We don't have `select_api_version` tests like
+		    // Go and Java because in ur case, trying to call
+		    // `fdb::select_api_version` more than once will
+		    // cause a panic. We have integration tests for
+		    // that.
+
+		    self.test_tr_options();
+		    self.test_watches();
+		    self.test_locality();
+		}
                 _ => panic!("Unhandled operation {}", op),
             }
         }

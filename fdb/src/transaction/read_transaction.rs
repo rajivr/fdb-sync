@@ -1,5 +1,7 @@
 use crate::error::{FdbError, FdbResult};
-use crate::future::{FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit};
+use crate::future::{
+    FdbFutureCStringArray, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit,
+};
 use crate::range::{Range, RangeOptions, RangeResult};
 use crate::transaction::{ReadTransactionContext, TransactionOption};
 use crate::{Key, KeySelector};
@@ -36,6 +38,13 @@ pub trait ReadTransaction {
 
     /// Gets a value from the database.
     fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t>;
+
+    /// Get a list of public network addresses as [`CString`], one for
+    /// each of the storage servers responsible for storing [`Key`]
+    /// and its associated value.
+    ///
+    /// [`CString`]: std::ffi::CString
+    fn get_addresses_for_key<'t>(&'t self, key: Key) -> FdbFutureCStringArray<'t>;
 
     /// Gets an estimate for the number of bytes stored in the given
     /// range.
@@ -102,6 +111,7 @@ pub trait ReadTransaction {
     ///
     /// See [C API] for more details.
     ///
+    /// [`Transaction`]: crate::transaction::Transaction
     /// [`run`]: crate::transaction::TransactionContext::run
     /// [`read`]: crate::transaction::ReadTransactionContext::read
     /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_on_error
@@ -129,7 +139,7 @@ impl ReadTransactionContext for &dyn ReadTransaction {
         Self: Sized,
         F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
     {
-	f(*self)
+        f(*self)
     }
 }
 

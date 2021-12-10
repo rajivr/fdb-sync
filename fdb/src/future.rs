@@ -4,6 +4,7 @@
 use bytes::Bytes;
 
 use std::convert::TryInto;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::slice;
@@ -52,6 +53,19 @@ where
         unsafe {
             fdb_sys::fdb_future_block_until_ready(fut_c_ptr);
             FdbFutureGet::get(fut_c_ptr)
+        }
+    }
+
+    /// Returns [`true`] if the FDB future is ready, [`false`]
+    /// otherwise, without blocking. A FDB future is ready either when
+    /// it has received a value or has been set to an error state.
+    pub fn is_ready(&self) -> bool {
+        let fut_c_ptr = (&self.c_ptr.as_ref().unwrap()).as_ptr();
+
+        if unsafe { fdb_sys::fdb_future_is_ready(fut_c_ptr) } == 0 {
+            false
+        } else {
+            true
         }
     }
 
@@ -178,6 +192,34 @@ impl FdbFutureGet for Option<Value> {
     }
 }
 
+/// Represents the asynchronous result of a function that returns an
+/// array of [`CString`].
+pub type FdbFutureCStringArray<'t> = FdbFuture<'t, Vec<CString>>;
+
+impl FdbFutureGet for Vec<CString> {
+    unsafe fn get(future: *mut fdb_sys::FDBFuture) -> FdbResult<Vec<CString>> {
+        let mut out_strings = ptr::null_mut();
+        let mut out_count = 0;
+
+        check(fdb_sys::fdb_future_get_string_array(
+            future,
+            &mut out_strings,
+            &mut out_count,
+        ))
+        .map(|_| {
+            let mut cstring_list = Vec::with_capacity(out_count.try_into().unwrap());
+
+            (0..out_count).into_iter().for_each(|i| {
+                cstring_list.push(CString::from(CStr::from_ptr(
+                    *out_strings.offset(i.try_into().unwrap()),
+                )));
+            });
+
+            cstring_list
+        })
+    }
+}
+
 pub(crate) type FdbFutureKeyValueArray<'t> = FdbFuture<'t, KeyValueArray>;
 
 impl FdbFutureGet for KeyValueArray {
@@ -223,7 +265,8 @@ mod tests {
     use impls::impls;
 
     use super::{
-        FdbFutureI64, FdbFutureKey, FdbFutureKeyValueArray, FdbFutureMaybeValue, FdbFutureUnit,
+        FdbFutureCStringArray, FdbFutureI64, FdbFutureKey, FdbFutureKeyValueArray,
+        FdbFutureMaybeValue, FdbFutureUnit,
     };
 
     #[test]
@@ -255,6 +298,14 @@ mod tests {
         #[rustfmt::skip]
 	assert!(impls!(
 	    FdbFutureMaybeValue<'_>:
+	        !Copy &
+		!Clone &
+		!Send &
+		!Sync));
+
+        #[rustfmt::skip]
+	assert!(impls!(
+	    FdbFutureCStringArray<'_>:
 	        !Copy &
 		!Clone &
 		!Send &
