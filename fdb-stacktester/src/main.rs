@@ -116,9 +116,11 @@ struct NonFutureStackEntry {
 }
 
 // These are items that can go on the stack.
+//
+// We don't construct variants `FdbFutureI64(*mut i64)`,
+// `FdbFutureCStringArray(*mut Vec<CString>)`.
 #[derive(Debug, Clone)]
 enum StackEntryItem {
-    FdbFutureI64(*mut i64),
     FdbFutureKey(*mut Key),
     FdbFutureMaybeValue(*mut Option<Value>),
     FdbFutureUnit(*mut ()),
@@ -210,21 +212,19 @@ impl StackMachine {
         }
     }
 
-    fn to_non_future_stack_entry_item(sei: StackEntryItem) -> NonFutureStackEntryItem {
+    fn to_non_future_stack_entry_item(sei: StackEntryItem) -> Option<NonFutureStackEntryItem> {
         match sei {
-            StackEntryItem::BigInt(b) => NonFutureStackEntryItem::BigInt(b),
-            StackEntryItem::Bool(b) => NonFutureStackEntryItem::Bool(b),
-            StackEntryItem::Bytes(b) => NonFutureStackEntryItem::Bytes(b),
-            StackEntryItem::Float(f) => NonFutureStackEntryItem::Float(f),
-            StackEntryItem::Double(f) => NonFutureStackEntryItem::Double(f),
-            StackEntryItem::Null => NonFutureStackEntryItem::Null,
-            StackEntryItem::String(s) => NonFutureStackEntryItem::String(s),
-            StackEntryItem::Tuple(t) => NonFutureStackEntryItem::Tuple(t),
-            StackEntryItem::Uuid(u) => NonFutureStackEntryItem::Uuid(u),
-            StackEntryItem::Versionstamp(vs) => NonFutureStackEntryItem::Versionstamp(vs),
-            _ => panic!(
-                "Cannot convert to NonFutureStackEntryItem as the variant contains an FdbFuture"
-            ),
+            StackEntryItem::BigInt(b) => Some(NonFutureStackEntryItem::BigInt(b)),
+            StackEntryItem::Bool(b) => Some(NonFutureStackEntryItem::Bool(b)),
+            StackEntryItem::Bytes(b) => Some(NonFutureStackEntryItem::Bytes(b)),
+            StackEntryItem::Float(f) => Some(NonFutureStackEntryItem::Float(f)),
+            StackEntryItem::Double(f) => Some(NonFutureStackEntryItem::Double(f)),
+            StackEntryItem::Null => Some(NonFutureStackEntryItem::Null),
+            StackEntryItem::String(s) => Some(NonFutureStackEntryItem::String(s)),
+            StackEntryItem::Tuple(t) => Some(NonFutureStackEntryItem::Tuple(t)),
+            StackEntryItem::Uuid(u) => Some(NonFutureStackEntryItem::Uuid(u)),
+            StackEntryItem::Versionstamp(vs) => Some(NonFutureStackEntryItem::Versionstamp(vs)),
+            _ => None,
         }
     }
 
@@ -243,20 +243,11 @@ impl StackMachine {
         }
     }
 
-    fn to_non_future_stack_entry(se: StackEntry) -> NonFutureStackEntry {
+    fn to_non_future_stack_entry(se: StackEntry) -> Option<NonFutureStackEntry> {
         let StackEntry { item, inst_number } = se;
 
-        let item = StackMachine::to_non_future_stack_entry_item(item);
-
-        NonFutureStackEntry { item, inst_number }
-    }
-
-    fn to_stack_entry(nfse: NonFutureStackEntry) -> StackEntry {
-        let NonFutureStackEntry { item, inst_number } = nfse;
-
-        let item = StackMachine::to_stack_entry_item(item);
-
-        StackEntry { item, inst_number }
+        StackMachine::to_non_future_stack_entry_item(item)
+            .map(|item| NonFutureStackEntry { item, inst_number })
     }
 
     // There is a crate only method `.code()` on `StreamingMode` that
@@ -350,24 +341,6 @@ impl StackMachine {
         let StackEntry { item, inst_number } = self.stack.pop().unwrap();
 
         match item {
-            StackEntryItem::FdbFutureI64(raw_ptr_i64) => {
-                let fdb_fut_i64 = StackMachine::get_bounded_fdb_future(transaction, raw_ptr_i64);
-                fdb_fut_i64
-                    .join()
-                    .map(|x| {
-                        let item = NonFutureStackEntryItem::BigInt(x.into());
-                        NonFutureStackEntry { item, inst_number }
-                    })
-                    .unwrap_or_else(|err| {
-                        let item = NonFutureStackEntryItem::Bytes({
-                            let mut t = Tuple::new();
-                            t.add_bytes(Bytes::from(&b"ERROR"[..]));
-                            t.add_bytes(Bytes::from(format!("{}", err.code())));
-                            t.pack()
-                        });
-                        NonFutureStackEntry { item, inst_number }
-                    })
-            }
             StackEntryItem::FdbFutureKey(raw_ptr_key) => {
                 let fdb_fut_key = StackMachine::get_bounded_fdb_future(transaction, raw_ptr_key);
                 fdb_fut_key
@@ -1022,35 +995,35 @@ impl StackMachine {
             println!("{}. Instruction is {} ({:?})", inst_number, op, self.prefix);
         }
 
-        // `NEW_TRANSACTION` op is special. We assume that we have a
-        // valid transaction below in
-        // `self.current_transaction`. However, we won't have a valid
-        // transaction till `NEW_TRANSACTION` instruction create it.
-        if op.as_str() == "NEW_TRANSACTION" {
-            self.new_transaction()
-        } else {
-            // In the Go bindings, there is no `is_snapshot`.
-            let mut is_snapshot = false;
-            let mut is_database = false;
-
-            // Tie the lifetime of transaction to this variable.  We
-            // need to do this hackery because we don't what `'self`
-            // to get immutably borrowed because of
-            // `self.current_transaction`.
-            let current_transaction_lifetime = ();
-
-            let tr = self.current_transaction(&current_transaction_lifetime);
-            let tr_snap = tr.snapshot();
-
-            if op.ends_with("_SNAPSHOT") {
-                op.drain((op.len() - 9)..);
-                is_snapshot = true;
-            } else if op.ends_with("_DATABASE") {
-                op.drain((op.len() - 9)..);
-                is_database = true;
-            }
-
+        if [
+            "NEW_TRANSACTION",
+            "PUSH",
+            "DUP",
+            "EMPTY_STACK",
+            "SWAP",
+            "POP",
+            "SUB",
+            "CONCAT",
+            "LOG_STACK",
+            "START_THREAD",
+            "UNIT_TESTS",
+        ]
+        .contains(&op.as_str())
+        {
+            // For these instructions we can potentially have an
+            // invalid `TrMap` entry (which can call
+            // `current_transaction` to fail) *or* we don't need to
+            // use `current_transaction` as it only operates on the
+            // stack.
             match op.as_str() {
+                "NEW_TRANSACTION" => {
+                    // `NEW_TRANSACTION` op is special. We assume that
+                    // we have a valid transaction below in
+                    // `self.current_transaction`. However, we won't
+                    // have a valid transaction till `NEW_TRANSACTION`
+                    // instruction create it.
+                    self.new_transaction();
+                }
                 // Data Operations [1]
                 //
                 // [1]: https://github.com/apple/foundationdb/blob/6.3.22/bindings/bindingtester/spec/bindingApiTester.md#data-operations
@@ -1096,8 +1069,87 @@ impl StackMachine {
                     self.store(inst_number, StackEntryItem::BigInt(a - b));
                 }
                 "CONCAT" => {
-                    let outer_a = self.stack.pop().unwrap().item;
-                    let outer_b = self.stack.pop().unwrap().item;
+                    let mut outer_a = self.stack.pop().unwrap().item;
+                    let mut outer_b = self.stack.pop().unwrap().item;
+
+                    // The block below is hack. It looks like
+                    // `scripted` tests pushes a `FdbFutureKey` and
+                    // `FdbFutureMaybeValue`. So, if either `outer_a` or
+                    // `outer_b` is a future, join on it and covert it
+                    // into `StackEntryItem::Bytes`.
+                    //
+                    // We could have moved `concat` below. However,
+                    // then we'll have to assume that `CONCAT` always
+                    // is run when there is an active transaction,
+                    // which might not be the case.
+                    //
+                    // This is a hacky compromise.
+                    {
+                        if let StackEntryItem::FdbFutureKey(raw_ptr_key) = outer_a {
+                            let current_transaction_lifetime = ();
+                            let tr = self.current_transaction(&current_transaction_lifetime);
+
+                            let fdb_fut_key = StackMachine::get_bounded_fdb_future(tr, raw_ptr_key);
+
+                            outer_a = fdb_fut_key
+                                .join()
+                                .map(|x| StackEntryItem::Bytes(x.into()))
+                                .unwrap_or_else(|err| {
+                                    panic!("Error occurred during `join`: {:?}", err)
+                                });
+                        }
+
+                        if let StackEntryItem::FdbFutureKey(raw_ptr_key) = outer_b {
+                            let current_transaction_lifetime = ();
+                            let tr = self.current_transaction(&current_transaction_lifetime);
+
+                            let fdb_fut_key = StackMachine::get_bounded_fdb_future(tr, raw_ptr_key);
+                            outer_b = fdb_fut_key
+                                .join()
+                                .map(|x| StackEntryItem::Bytes(x.into()))
+                                .unwrap_or_else(|err| {
+                                    panic!("Error occurred during `join`: {:?}", err)
+                                });
+                        }
+
+                        if let StackEntryItem::FdbFutureMaybeValue(raw_ptr_maybe_value) = outer_a {
+                            let current_transaction_lifetime = ();
+                            let tr = self.current_transaction(&current_transaction_lifetime);
+
+                            let fdb_fut_maybe_value =
+                                StackMachine::get_bounded_fdb_future(tr, raw_ptr_maybe_value);
+
+                            outer_a = fdb_fut_maybe_value
+                                .join()
+                                .map(|x| {
+                                    StackEntryItem::Bytes(
+                                        x.map(|y| y.into()).unwrap_or_else(|| Bytes::new()),
+                                    )
+                                })
+                                .unwrap_or_else(|err| {
+                                    panic!("Error occurred during `join`: {:?}", err)
+                                });
+                        }
+
+                        if let StackEntryItem::FdbFutureMaybeValue(raw_ptr_maybe_value) = outer_b {
+                            let current_transaction_lifetime = ();
+                            let tr = self.current_transaction(&current_transaction_lifetime);
+
+                            let fdb_fut_maybe_value =
+                                StackMachine::get_bounded_fdb_future(tr, raw_ptr_maybe_value);
+
+                            outer_b = fdb_fut_maybe_value
+                                .join()
+                                .map(|x| {
+                                    StackEntryItem::Bytes(
+                                        x.map(|y| y.into()).unwrap_or_else(|| Bytes::new()),
+                                    )
+                                })
+                                .unwrap_or_else(|err| {
+                                    panic!("Error occurred during `join`: {:?}", err)
+                                });
+                        }
+                    }
 
                     match (outer_a, outer_b) {
                     (StackEntryItem::Bytes(a), StackEntryItem::Bytes(b)) => {
@@ -1116,10 +1168,20 @@ impl StackMachine {
                 };
                 }
                 "LOG_STACK" => {
-                    // Here we assume that the stack *does not* have any
-                    // `FdbFuture` variants, so we can successfully log
-                    // the entire stack, *without* having to wait on any
+                    // Here we assume that when running in `--compare` mode
+                    // the stack *does not* have any `FdbFuture`
+                    // variants, so we can successfully log the entire
+                    // stack, *without* having to wait on any
                     // `FdbFuture`.
+                    //
+                    // In `--concurrency` mode, the stack can have a
+                    // future in it, which we just ignore. This means,
+                    // `--compare` mode and `--concurrency` modes are
+                    // mutually exclusive.
+                    //
+                    // In both the cases `fdb-stacktester` won't panic
+                    // here. Error has be detected by
+                    // `bindingtester.py`.
                     //
                     // `log_prefix` is `PREFIX`.
                     let log_prefix =
@@ -1133,10 +1195,10 @@ impl StackMachine {
 
                     while self.stack.len() > 0 {
                         let k = self.stack.len() - 1;
-                        entries.insert(
-                            k,
-                            StackMachine::to_non_future_stack_entry(self.stack.pop().unwrap()),
-                        );
+
+                        StackMachine::to_non_future_stack_entry(self.stack.pop().unwrap())
+                            .map(|i| entries.insert(k, i));
+
                         // Do the transaction on 100 entries.
                         if entries.len() == 100 {
                             self.log_stack(entries.clone(), log_prefix.clone());
@@ -1149,7 +1211,61 @@ impl StackMachine {
                         self.log_stack(entries, log_prefix);
                     }
                 }
+                // Thread Operations
+                //
+                // `WAIT_EMPTY` uses `current_transaction`.
+                "START_THREAD" => {
+                    let prefix = if let StackEntryItem::Bytes(b) = self.stack.pop().unwrap().item {
+                        b
+                    } else {
+                        panic!("StackEntryItem::Bytes was expected, but not found");
+                    };
+                    tokio::spawn(stack_tester_task(StackTesterTask::new(
+                        prefix,
+                        self.db.clone(),
+                        self.tr_map.clone(),
+                        self.task_finished.clone(),
+                    )));
+                }
+                // Miscellaneous
+                "UNIT_TESTS" => {
+                    self.test_db_options();
 
+                    // We don't have `select_api_version` tests like
+                    // Go and Java because in our case, trying to call
+                    // `fdb::select_api_version` more than once will
+                    // cause a panic. We have integration tests for
+                    // `fdb::select_api_version`.
+
+                    self.test_tr_options();
+                    self.test_watches();
+                    self.test_locality();
+                }
+                _ => panic!("Unhandled operation {}", op),
+            }
+        } else {
+            // In the Go bindings, there is no `is_snapshot`.
+            let mut is_snapshot = false;
+            let mut is_database = false;
+
+            // Tie the lifetime of transaction to this variable.  We
+            // need to do this hackery because we don't what `'self`
+            // to get immutably borrowed because of
+            // `self.current_transaction`.
+            let current_transaction_lifetime = ();
+
+            let tr = self.current_transaction(&current_transaction_lifetime);
+            let tr_snap = tr.snapshot();
+
+            if op.ends_with("_SNAPSHOT") {
+                op.drain((op.len() - 9)..);
+                is_snapshot = true;
+            } else if op.ends_with("_DATABASE") {
+                op.drain((op.len() - 9)..);
+                is_database = true;
+            }
+
+            match op.as_str() {
                 // FoundationDB Operations [1]
                 //
                 // While there is no classification of FoundationDB
@@ -1245,6 +1361,13 @@ impl StackMachine {
                     self.current_transaction(&current_transaction_lifetime)
                         .cancel();
                 },
+		"GET_VERSIONSTAMP" => {
+		    let item = StackEntryItem::FdbFutureKey(FdbFuture::into_raw(unsafe {
+			self.current_transaction(&current_transaction_lifetime).get_versionstamp()
+		    }));
+
+		    self.store(inst_number, item);
+		}
                 // Take care of `GET_READ_VERSION`, `SET`, `ATOMIC_OP` here as it
                 // is one of the first APIs that is needed for binding
                 // tester to work.
@@ -1937,20 +2060,6 @@ impl StackMachine {
 		    }
 		}
 		// Thread Operations
-		"START_THREAD" => {
-		    let prefix =
-			if let NonFutureStackEntryItem::Bytes(b) = self.wait_and_pop(tr).item {
-                b
-			} else {
-			    panic!("NonFutureStackEntryItem::Bytes was expected, but not found");
-			};
-		    tokio::spawn(stack_tester_task(StackTesterTask::new(
-			prefix,
-			self.db.clone(),
-			self.tr_map.clone(),
-			self.task_finished.clone(),
-		    )));
-		}
 		"WAIT_EMPTY" => {
 		    let prefix_range = self.pop_prefix_range(tr);
 		    let begin_key_selector = KeySelector::first_greater_or_equal(prefix_range.begin().clone());
@@ -1972,20 +2081,6 @@ impl StackMachine {
                         ),
                         Err(err) => self.push_err(inst_number, err),
 		    }
-		}
-		// Miscellaneous
-		"UNIT_TESTS" => {
-		    self.test_db_options();
-
-		    // We don't have `select_api_version` tests like
-		    // Go and Java because in ur case, trying to call
-		    // `fdb::select_api_version` more than once will
-		    // cause a panic. We have integration tests for
-		    // that.
-
-		    self.test_tr_options();
-		    self.test_watches();
-		    self.test_locality();
 		}
                 _ => panic!("Unhandled operation {}", op),
             }
