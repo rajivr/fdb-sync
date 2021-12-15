@@ -13,14 +13,14 @@ fn main() {
     let fdb_database = fdb::open_database(fdb_cluster_file).unwrap();
 
     fdb_database
-        .run(|tr| {
+        .run(None, |tr| {
             tr.set(Bytes::from("hello").into(), Bytes::from("world").into());
             Ok(())
         })
         .unwrap_or_else(|err| panic!("Error occurred during `run`: {:?}", err));
 
     let ret = fdb_database
-        .read(|tr| Ok(tr.get(Bytes::from("hello").into()).join()?))
+        .read(None, |tr| Ok(tr.get(Bytes::from("hello").into()).join()?))
         .unwrap_or_else(|err| panic!("Error occured during `read`: {:?}", err))
         .expect("Key not found");
 
@@ -30,7 +30,9 @@ fn main() {
     );
 
     let ret = fdb_database
-        .run(|tr| Ok(tr.snapshot().get(Bytes::from("hello").into()).join()?))
+        .run(None, |tr| {
+            Ok(tr.snapshot().get(Bytes::from("hello").into()).join()?)
+        })
         .unwrap_or_else(|err| panic!("Error occured during `run`: {:?}", err))
         .expect("Key not found");
 

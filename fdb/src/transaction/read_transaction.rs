@@ -1,3 +1,5 @@
+use tokio_util::sync::CancellationToken;
+
 use crate::error::{FdbError, FdbResult};
 use crate::future::{
     FdbFutureCStringArray, FdbFutureI64, FdbFutureKey, FdbFutureMaybeValue, FdbFutureUnit,
@@ -35,6 +37,16 @@ pub trait ReadTransaction {
     ///
     /// [`conflict range`]: https://apple.github.io/foundationdb/developer-guide.html#conflict-ranges
     fn add_read_conflict_range_if_not_snapshot(&self, range: Range) -> FdbResult<()>;
+
+    /// Cancels the [`Transaction`].
+    ///
+    /// # Safety
+    ///
+    /// See [C API] for more details.
+    ///
+    /// [`Transaction`]: crate::transaction::Transaction
+    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_cancel
+    unsafe fn cancel(&self);
 
     /// Gets a value from the database.
     fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t>;
@@ -134,11 +146,12 @@ pub trait ReadTransaction {
 }
 
 impl ReadTransactionContext for &dyn ReadTransaction {
-    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    fn read<T, F>(&self, _cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
     {
+        // We ignore `_cancellation_token` in this impl.
         f(*self)
     }
 }

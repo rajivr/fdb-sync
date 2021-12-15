@@ -606,7 +606,7 @@ impl StackMachine {
 
     fn test_tr_options(&self) {
         self.db
-            .run(|t| {
+            .run(None, |t| {
                 t.set_option(TransactionOption::PrioritySystemImmediate)?;
                 t.set_option(TransactionOption::PriorityBatch)?;
                 t.set_option(TransactionOption::CausalReadRisky)?;
@@ -656,7 +656,7 @@ impl StackMachine {
                         }
                     }
                     Err(err) => {
-                        let tr = self.db.create_transaction().unwrap_or_else(|err| {
+                        let tr = self.db.create_transaction(None).unwrap_or_else(|err| {
                             panic!("Error occurred during `create_transaction`: {:?}", err)
                         });
 
@@ -678,7 +678,7 @@ impl StackMachine {
     fn test_watches(&self) {
         loop {
             self.db
-                .run(|t| {
+                .run(None, |t| {
                     t.set(
                         Bytes::from(&b"w0"[..]).into(),
                         Bytes::from(&b"0"[..]).into(),
@@ -698,7 +698,7 @@ impl StackMachine {
             let (watches, boxed_tr) = self
                 .db
                 .clone()
-                .run_and_get_transaction(|t| {
+                .run_and_get_transaction(None, |t| {
                     let mut watches = Vec::new();
 
                     watches.push(FdbFuture::into_raw(t.watch(Bytes::from(&b"w0"[..]).into())));
@@ -739,7 +739,7 @@ impl StackMachine {
             }
 
             self.db
-                .run(|t| {
+                .run(None, |t| {
                     t.set(
                         Bytes::from(&b"w0"[..]).into(),
                         Bytes::from(&b"a"[..]).into(),
@@ -772,11 +772,12 @@ impl StackMachine {
 
     fn test_locality(&self) {
         self.db
-            .run(|t| {
+            .run(None, |t| {
                 t.set_option(TransactionOption::Timeout(60 * 1000))?;
                 t.set_option(TransactionOption::ReadSystemKeys)?;
 
                 let boundary_keys = self.db.get_boundary_keys(
+                    None,
                     Bytes::from(&b""[..]).into(),
                     Bytes::from(&b"\xFF\xFF"[..]).into(),
                     0,
@@ -826,7 +827,7 @@ impl StackMachine {
         F: Fn(&dyn Transaction<Database = FdbDatabase>) -> FdbResult<T>,
     {
         if is_database {
-            match self.db.run(f) {
+            match self.db.run(None, f) {
                 Ok(_) => {
                     // We do this to simulate "_DATABASE may
                     // optionally push a future onto the stack".
@@ -838,7 +839,7 @@ impl StackMachine {
                 Err(err) => self.push_err(inst_number, err),
             }
         } else {
-            if let Err(err) = tr.run(f) {
+            if let Err(err) = tr.run(None, f) {
                 self.push_err(inst_number, err);
             }
         }
@@ -846,7 +847,7 @@ impl StackMachine {
 
     fn log_stack(&self, entries: HashMap<usize, NonFutureStackEntry>, log_prefix: Bytes) {
         self.db
-            .run(|tr| {
+            .run(None, |tr| {
                 for (stack_index, stack_entry) in entries.clone().drain() {
                     let packed_key = {
                         let mut t = Tuple::new();
@@ -898,7 +899,7 @@ impl StackMachine {
 
     fn new_transaction(&self) {
         let new_fdb_tr_ptr =
-            FdbTransaction::into_raw(self.db.create_transaction().unwrap_or_else(|err| {
+            FdbTransaction::into_raw(self.db.create_transaction(None).unwrap_or_else(|err| {
                 panic!("Error occurred during `create_transaction`: {:?}", err)
             }));
 
@@ -935,7 +936,7 @@ impl StackMachine {
     fn switch_transaction(&mut self, tr_name: Bytes) {
         self.tr_map.entry(tr_name.clone()).or_insert_with(|| {
             let new_fdb_tr_ptr =
-                FdbTransaction::into_raw(self.db.create_transaction().unwrap_or_else(|err| {
+                FdbTransaction::into_raw(self.db.create_transaction(None).unwrap_or_else(|err| {
                     panic!("Error occurred during `create_transaction`: {:?}", err);
                 }));
             FdbTransactionPtrWrapper::new(new_fdb_tr_ptr)
@@ -950,7 +951,7 @@ impl StackMachine {
     fn run(&mut self) {
         let kvs = self
             .db
-            .read(|tr| {
+            .read(None, |tr| {
                 let ops_range = {
                     let mut t = Tuple::new();
                     t.add_bytes(self.prefix.clone().into());
@@ -1770,7 +1771,7 @@ impl StackMachine {
                     // Only push future onto the stack for `GET` and
                     // `GET_SNAPSHOT`.
                     if is_database {
-                        match self.db.read(|rtr| Ok(rtr.get(key.clone().into()).join()?)) {
+                        match self.db.read(None, |rtr| Ok(rtr.get(key.clone().into()).join()?)) {
                             Ok(value) => {
                                 let item =
                                     StackEntryItem::Bytes(value.map(|v| v.into()).unwrap_or_else(
@@ -1812,11 +1813,11 @@ impl StackMachine {
                     let fn_closure = |t: &dyn ReadTransaction| Ok(t.get_key(sel.clone()).join()?);
 
                     match if is_database {
-                        self.db.read(fn_closure)
+                        self.db.read(None, fn_closure)
                     } else if is_snapshot {
-                        tr_snap.read(fn_closure)
+                        tr_snap.read(None, fn_closure)
                     } else {
-                        tr.read(fn_closure)
+                        tr.read(None, fn_closure)
                     } {
                         Ok(kb) => {
                             let key_bytes = Bytes::from(kb);
@@ -1891,11 +1892,11 @@ impl StackMachine {
                     };
 
                     match if is_database {
-                        self.db.read(fn_closure)
+                        self.db.read(None, fn_closure)
                     } else if is_snapshot {
-                        tr_snap.read(fn_closure)
+                        tr_snap.read(None, fn_closure)
                     } else {
-                        tr.read(fn_closure)
+                        tr.read(None, fn_closure)
                     } {
                         Ok(kvs) => {
                             let mut res = Tuple::new();
@@ -2051,7 +2052,7 @@ impl StackMachine {
 		"GET_ESTIMATED_RANGE_SIZE" => {
 		    let key_range = self.pop_key_range(tr);
 
-		    match tr_snap.read(|t| Ok(t.get_estimated_range_size_bytes(key_range.clone()).join()?)) {
+		    match tr_snap.read(None, |t| Ok(t.get_estimated_range_size_bytes(key_range.clone()).join()?)) {
                         Ok(_) => self.store(
                             inst_number,
                             StackEntryItem::Bytes(Bytes::from_static(&b"GOT_ESTIMATED_RANGE_SIZE"[..])),
@@ -2064,7 +2065,7 @@ impl StackMachine {
 		    let prefix_range = self.pop_prefix_range(tr);
 		    let begin_key_selector = KeySelector::first_greater_or_equal(prefix_range.begin().clone());
 		    let end_key_selector = KeySelector::first_greater_or_equal(prefix_range.end().clone());
-		    match self.db.run(|t| {
+		    match self.db.run(None, |t| {
 			if t.get_range(
 			    begin_key_selector.clone(),
 			    end_key_selector.clone(),

@@ -1,5 +1,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
+use tokio_util::sync::CancellationToken;
+
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -36,12 +38,19 @@ impl FdbDatabase {
     /// returns a Rust tuple containing the result of the closure and
     /// the [`Versionstamp`] without the user version.
     ///
+    /// Optionally takes a [`CancellationToken`], if you want to
+    /// cancel the transaction.
+    ///
     /// [`Versionstamp`]: crate::tuple::Versionstamp
-    pub fn run_and_get_versionstamp<T, F>(&self, f: F) -> FdbResult<(T, Bytes)>
+    pub fn run_and_get_versionstamp<T, F>(
+        &self,
+        cancellation_token: Option<CancellationToken>,
+        f: F,
+    ) -> FdbResult<(T, Bytes)>
     where
         F: Fn(&dyn Transaction<Database = Self>) -> FdbResult<T>,
     {
-        let t = self.create_transaction()?;
+        let t = self.create_transaction(cancellation_token)?;
         loop {
             let ret_val = f(&t);
 
@@ -96,12 +105,19 @@ impl FdbDatabase {
     /// and returns a Rust tuple containing the result of the closure
     /// and the [`FdbTransaction`] after the transaction has
     /// committed.
-    pub fn run_and_get_transaction<T, F>(self, f: F) -> FdbResult<(T, Box<FdbTransaction>)>
+    ///
+    /// Optionally takes a [`CancellationToken`], if you want to
+    /// cancel the transaction.
+    pub fn run_and_get_transaction<T, F>(
+        self,
+        cancellation_token: Option<CancellationToken>,
+        f: F,
+    ) -> FdbResult<(T, Box<FdbTransaction>)>
     where
         Self: Sized,
         F: Fn(&FdbTransaction) -> FdbResult<T>,
     {
-        let t = self.create_transaction()?;
+        let t = self.create_transaction(cancellation_token)?;
         loop {
             let ret_val = f(&t);
 
@@ -165,12 +181,12 @@ unsafe impl Send for FdbDatabase {}
 unsafe impl Sync for FdbDatabase {}
 
 impl ReadTransactionContext for FdbDatabase {
-    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    fn read<T, F>(&self, cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
     {
-        let t = self.create_transaction()?;
+        let t = self.create_transaction(cancellation_token)?;
         loop {
             let ret_val = f(&t);
 
@@ -199,12 +215,12 @@ impl ReadTransactionContext for FdbDatabase {
 impl TransactionContext for FdbDatabase {
     type Database = FdbDatabase;
 
-    fn run<T, F>(&self, f: F) -> FdbResult<T>
+    fn run<T, F>(&self, cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
     {
-        let t = self.create_transaction()?;
+        let t = self.create_transaction(cancellation_token)?;
         loop {
             let ret_val = f(&t);
 
@@ -245,7 +261,10 @@ impl TransactionContext for FdbDatabase {
 impl Database for FdbDatabase {
     type Transaction = FdbTransaction;
 
-    fn create_transaction(&self) -> FdbResult<FdbTransaction> {
+    fn create_transaction(
+        &self,
+        cancellation_token: Option<CancellationToken>,
+    ) -> FdbResult<FdbTransaction> {
         let mut ptr: *mut fdb_sys::FDB_transaction = ptr::null_mut();
         // Safety: It is safe to unwrap here because if we have given
         // out an `FdbDatabase` then `inner` *must* be
@@ -261,6 +280,7 @@ impl Database for FdbDatabase {
                 NonNull::new(ptr).expect(
                     "fdb_database_create_transaction returned null, but did not return an error",
                 ),
+                cancellation_token,
                 self.clone(),
             )
         })
@@ -275,12 +295,13 @@ impl Database for FdbDatabase {
 
     fn get_boundary_keys(
         &self,
+        cancellation_token: Option<CancellationToken>,
         begin: Key,
         end: Key,
         limit: i32,
         read_version: i64,
     ) -> FdbResult<Vec<Key>> {
-        let tr = self.create_transaction()?;
+        let tr = self.create_transaction(cancellation_token)?;
 
         if read_version != 0 {
             unsafe {

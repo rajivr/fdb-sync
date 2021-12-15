@@ -50,15 +50,17 @@ const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 ///
 /// ```ignore
 /// let (_, tr_version) = fdb_database
-///     .run_and_get_versionstamp(|tr| {
+///     .run_and_get_versionstamp(None, |tr| {
 ///         let mut t = Tuple::new();
 ///         t.add_string("prefix".to_string());
 ///         t.add_versionstamp(Versionstamp::incomplete(0));
-///         tr.mutate(
-///             MutationType::SetVersionstampedKey,
-///             t.pack_with_versionstamp(Bytes::new())?.into(),
-///             Bytes::new(),
-///         );
+///         unsafe {
+///             tr.mutate(
+///                 MutationType::SetVersionstampedKey,
+///                 t.pack_with_versionstamp(Bytes::new())?.into(),
+///                 Bytes::new(),
+///             );
+///         }
 ///
 ///         Ok(())
 ///     })
@@ -70,7 +72,7 @@ const VERSIONSTAMP_USER_VERSION_LEN: usize = 2;
 ///     });
 ///
 /// let vs = fdb_database
-///     .run(|tr| {
+///     .run(None, |tr| {
 ///         let subspace = Subspace::new(Bytes::new()).subspace(&{
 ///             let mut t = Tuple::new();
 ///             t.add_string("prefix".to_string());

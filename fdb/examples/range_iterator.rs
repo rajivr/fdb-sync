@@ -16,7 +16,7 @@ fn main() {
 
     // Clear the database.
     fdb_database
-        .run(|tr| {
+        .run(None, |tr| {
             tr.clear_range(Range::new(
                 Bytes::from(&b""[..]).into(),
                 Bytes::from(&[0xFFu8][..]).into(),
@@ -27,7 +27,7 @@ fn main() {
 
     // Set a few key values.
     fdb_database
-        .run(|tr| {
+        .run(None, |tr| {
             tr.set(Bytes::from("apple").into(), Bytes::from("foo").into());
             tr.set(Bytes::from("cherry").into(), Bytes::from("baz").into());
             tr.set(Bytes::from("banana").into(), Bytes::from("bar").into());
@@ -38,7 +38,7 @@ fn main() {
     println!("read using Iterator trait");
 
     fdb_database
-        .read(|tr| {
+        .read(None, |tr| {
             for x in tr.get_range(
                 KeySelector::first_greater_or_equal(Bytes::from(&b""[..]).into()),
                 KeySelector::first_greater_or_equal(Bytes::from(&[0xFFu8][..]).into()),
@@ -60,7 +60,7 @@ fn main() {
     println!("read using RangeResult::get");
 
     fdb_database
-        .read(|tr| {
+        .read(None, |tr| {
             // iterating on a Vec<KeyValue>
             for kv in tr
                 .get_range(

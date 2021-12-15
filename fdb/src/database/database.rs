@@ -1,3 +1,5 @@
+use tokio_util::sync::CancellationToken;
+
 use crate::database::DatabaseOption;
 use crate::error::FdbResult;
 use crate::transaction::{Transaction, TransactionContext};
@@ -22,7 +24,13 @@ pub trait Database: TransactionContext {
     type Transaction: Transaction;
 
     /// Creates a [`Transaction`] that operates on this [`Database`].
-    fn create_transaction(&self) -> FdbResult<Self::Transaction>;
+    ///
+    /// Optionally takes a [`CancellationToken`], if you want to
+    /// cancel the transaction.
+    fn create_transaction(
+        &self,
+        cancellation_token: Option<CancellationToken>,
+    ) -> FdbResult<Self::Transaction>;
 
     /// Set options on a [`Database`].
     fn set_option(&self, option: DatabaseOption) -> FdbResult<()>;
@@ -41,9 +49,13 @@ pub trait Database: TransactionContext {
     ///
     /// This method is not transactional.
     ///
+    /// Optionally takes a [`CancellationToken`], if you want to
+    /// cancel the transaction.
+    ///
     /// [`get_boundary_keys`]: crate::database::Database::get_boundary_keys
     fn get_boundary_keys(
         &self,
+        cancellation_token: Option<CancellationToken>,
         begin: Key,
         end: Key,
         limit: i32,

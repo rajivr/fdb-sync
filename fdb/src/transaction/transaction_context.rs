@@ -1,3 +1,5 @@
+use tokio_util::sync::CancellationToken;
+
 use crate::database::Database;
 use crate::error::FdbResult;
 use crate::transaction::{ReadTransactionContext, Transaction};
@@ -19,7 +21,10 @@ pub trait TransactionContext: ReadTransactionContext {
     type Database: Database;
 
     /// Runs a closure in the context that takes a [`Transaction`].
-    fn run<T, F>(&self, f: F) -> FdbResult<T>
+    ///
+    /// Optionally takes a [`CancellationToken`], if you want to
+    /// cancel the transaction.
+    fn run<T, F>(&self, cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>;

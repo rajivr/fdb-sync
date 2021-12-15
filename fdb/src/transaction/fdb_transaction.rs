@@ -1,5 +1,7 @@
 use bytes::Bytes;
 
+use tokio_util::sync::CancellationToken;
+
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -34,11 +36,11 @@ use crate::{Key, KeySelector, Value};
 //       `FdbTransaction` type is by `Database::create_transaction`
 //       method. Once a value of `FdbTransaction` is created, it can
 //       *only* be moved around in the thread that it was created in
-//       and dropped in that thread. This is what allows us to safely
-//       return `TransactionContext::run_and_get_transaction` method.
+//       and dropped in that thread.
 #[derive(Debug)]
 pub struct FdbTransaction {
     c_ptr: Option<NonNull<fdb_sys::FDBTransaction>>,
+    cancellation_token: Option<CancellationToken>,
     fdb_database: FdbDatabase,
     read_snapshot: ReadSnapshot,
 }
@@ -67,19 +69,32 @@ impl FdbTransaction {
 
     pub(crate) fn new(
         c_ptr: NonNull<fdb_sys::FDBTransaction>,
+        cancellation_token: Option<CancellationToken>,
         fdb_database: FdbDatabase,
     ) -> FdbTransaction {
         FdbTransaction {
             c_ptr: Some(c_ptr),
+            cancellation_token: cancellation_token.clone(),
             fdb_database,
             read_snapshot: ReadSnapshot {
                 c_ptr: c_ptr.as_ptr(),
+                cancellation_token,
             },
         }
     }
 
     fn get_read_snapshot(&self) -> &ReadSnapshot {
         &self.read_snapshot
+    }
+
+    fn cancellation_test_and_set(&self) {
+        self.cancellation_token.as_ref().map(|ct| {
+            if ct.is_cancelled() {
+                unsafe {
+                    self.cancel();
+                }
+            }
+        });
     }
 }
 
@@ -92,17 +107,20 @@ impl Drop for FdbTransaction {
 }
 
 impl ReadTransactionContext for FdbTransaction {
-    fn read<T, F>(&self, f: F) -> FdbResult<T>
+    fn read<T, F>(&self, _cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn ReadTransaction) -> FdbResult<T>,
     {
+        // We ignore `_cancellation_token` in this impl.
         f(self)
     }
 }
 
 impl ReadTransaction for FdbTransaction {
     fn add_read_conflict_key_if_not_snapshot(&self, key: Key) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let begin_key = key;
         // Add a 0x00 to `end_key`. `begin_key` is inclusive and
         // `end_key` is exclusive. By appending `0x00` to `end_key` we
@@ -122,6 +140,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn add_read_conflict_range_if_not_snapshot(&self, range: Range) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let (begin, end) = range.destructure();
 
         // Safety: It is safe to unwrap here because if we have a
@@ -135,7 +155,18 @@ impl ReadTransaction for FdbTransaction {
         )
     }
 
+    unsafe fn cancel(&self) {
+        // Obviously there is no `cancellation_test_and_set()` here.
+
+        // Safety: It is safe to unwrap here because if we have a
+        // `self: &FdbTransaction`, then `c_ptr` *must* be
+        // `Some<NonNull<...>>`.
+        fdb_sys::fdb_transaction_cancel((self.c_ptr.unwrap()).as_ptr());
+    }
+
     fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t> {
+        self.cancellation_test_and_set();
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -143,6 +174,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn get_addresses_for_key<'t>(&'t self, key: Key) -> FdbFutureCStringArray<'t> {
+        self.cancellation_test_and_set();
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -150,6 +183,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn get_estimated_range_size_bytes<'t>(&'t self, range: Range) -> FdbFutureI64<'t> {
+        self.cancellation_test_and_set();
+
         let (begin, end) = range.destructure();
 
         // Safety: It is safe to unwrap here because if we have a
@@ -163,6 +198,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn get_key<'t>(&'t self, selector: KeySelector) -> FdbFutureKey<'t> {
+        self.cancellation_test_and_set();
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -175,6 +212,8 @@ impl ReadTransaction for FdbTransaction {
         end: KeySelector,
         options: RangeOptions,
     ) -> RangeResult<'t> {
+        self.cancellation_test_and_set();
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -201,6 +240,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     unsafe fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
+        self.cancellation_test_and_set();
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -208,10 +249,15 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn is_snapshot(&self) -> bool {
+        self.cancellation_test_and_set();
+
         false
     }
 
     unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
+        // We don't do `cancellation_test_and_set()` as it is part of
+        // retry logic.
+
         FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -221,6 +267,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
+        // We don't do `cancellation_test_and_set()` here.
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -228,6 +276,8 @@ impl ReadTransaction for FdbTransaction {
     }
 
     unsafe fn set_read_version(&self, version: i64) {
+        // We don't do `cancellation_test_and_set()` here.
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -238,11 +288,12 @@ impl ReadTransaction for FdbTransaction {
 impl TransactionContext for FdbTransaction {
     type Database = FdbDatabase;
 
-    fn run<T, F>(&self, f: F) -> FdbResult<T>
+    fn run<T, F>(&self, _cancellation_token: Option<CancellationToken>, f: F) -> FdbResult<T>
     where
         Self: Sized,
         F: Fn(&dyn Transaction<Database = Self::Database>) -> FdbResult<T>,
     {
+        // We ignore `_cancellation_token` in this impl.
         f(self)
     }
 }
@@ -251,6 +302,8 @@ impl Transaction for FdbTransaction {
     type Database = FdbDatabase;
 
     fn add_read_conflict_key(&self, key: Key) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let begin_key = key;
         // Add a 0x00 to `end_key`. `begin_key` is inclusive and
         // `end_key` is exclusive. By appending `0x00` to `end_key` we
@@ -270,6 +323,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn add_read_conflict_range(&self, range: Range) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let (begin, end) = range.destructure();
 
         // Safety: It is safe to unwrap here because if we have a
@@ -284,6 +339,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn add_write_conflict_key(&self, key: Key) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let begin_key = key;
         // Add a 0x00 to `end_key`. `begin_key` is inclusive and
         // `end_key` is exclusive. By appending `0x00` to `end_key` we
@@ -303,6 +360,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn add_write_conflict_range(&self, range: Range) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         let (begin, end) = range.destructure();
 
         // Safety: It is safe to unwrap here because if we have a
@@ -316,14 +375,9 @@ impl Transaction for FdbTransaction {
         )
     }
 
-    unsafe fn cancel(&self) {
-        // Safety: It is safe to unwrap here because if we have a
-        // `self: &FdbTransaction`, then `c_ptr` *must* be
-        // `Some<NonNull<...>>`.
-        fdb_sys::fdb_transaction_cancel((self.c_ptr.unwrap()).as_ptr());
-    }
-
     fn clear(&self, key: Key) {
+        self.cancellation_test_and_set();
+
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -341,6 +395,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn clear_range(&self, range: Range) {
+        self.cancellation_test_and_set();
+
         let (begin_key, end_key) = range.destructure();
 
         let bk = Bytes::from(begin_key);
@@ -366,6 +422,9 @@ impl Transaction for FdbTransaction {
     }
 
     unsafe fn commit<'t>(&'t self) -> FdbFutureUnit<'t> {
+        // We don't do `cancellation_test_and_set()` as it is part of
+        // retry logic.
+
         FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -375,6 +434,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn get_approximate_size<'t>(&'t self) -> FdbFutureI64<'t> {
+        self.cancellation_test_and_set();
+
         FdbFuture::new(unsafe {
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -384,6 +445,8 @@ impl Transaction for FdbTransaction {
     }
 
     unsafe fn get_committed_version(&self) -> FdbResult<i64> {
+        self.cancellation_test_and_set();
+
         let mut out_version = 0;
 
         check(
@@ -399,10 +462,14 @@ impl Transaction for FdbTransaction {
     }
 
     fn get_database(&self) -> FdbDatabase {
+        // We don't do `cancellation_test_and_set()` here.
+
         self.fdb_database.clone()
     }
 
     unsafe fn get_versionstamp<'t>(&'t self) -> FdbFutureKey<'t> {
+        self.cancellation_test_and_set();
+
         FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -412,6 +479,8 @@ impl Transaction for FdbTransaction {
     }
 
     unsafe fn mutate(&self, optype: MutationType, key: Key, param: Bytes) {
+        self.cancellation_test_and_set();
+
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -434,6 +503,8 @@ impl Transaction for FdbTransaction {
     }
 
     unsafe fn reset(&self) {
+        // We don't do `cancellation_test_and_set()` here.
+
         // Safety: It is safe to unwrap here because if we have a
         // `self: &FdbTransaction`, then `c_ptr` *must* be
         // `Some<NonNull<...>>`.
@@ -441,6 +512,8 @@ impl Transaction for FdbTransaction {
     }
 
     fn set(&self, key: Key, value: Value) {
+        self.cancellation_test_and_set();
+
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -466,10 +539,14 @@ impl Transaction for FdbTransaction {
     }
 
     fn snapshot(&self) -> &dyn ReadTransaction {
+        // We don't do `cancellation_test_and_set()` here.
+
         self.get_read_snapshot()
     }
 
     fn watch<'t>(&'t self, key: Key) -> FdbFutureUnit<'t> {
+        // We don't do `cancellation_test_and_set()` here.
+
         let k = Bytes::from(key);
         let key_name = k.as_ref().as_ptr();
         let key_name_length = k.as_ref().len().try_into().unwrap();
@@ -515,10 +592,25 @@ impl Transaction for FdbTransaction {
 #[derive(Debug)]
 struct ReadSnapshot {
     c_ptr: *mut fdb_sys::FDBTransaction,
+    cancellation_token: Option<CancellationToken>,
+}
+
+impl ReadSnapshot {
+    fn cancellation_test_and_set(&self) {
+        self.cancellation_token.as_ref().map(|ct| {
+            if ct.is_cancelled() {
+                unsafe {
+                    self.cancel();
+                }
+            }
+        });
+    }
 }
 
 impl ReadTransaction for ReadSnapshot {
     fn add_read_conflict_key_if_not_snapshot(&self, _key: Key) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         // return error, as this is a snapshot
         Err(FdbError::new(
             TRANSACTION_ADD_READ_CONFLICT_KEY_IF_NOT_SNAPSHOT,
@@ -526,27 +618,42 @@ impl ReadTransaction for ReadSnapshot {
     }
 
     fn add_read_conflict_range_if_not_snapshot(&self, _range: Range) -> FdbResult<()> {
+        self.cancellation_test_and_set();
+
         // return error, as this is a snapshot
         Err(FdbError::new(
             TRANSACTION_ADD_READ_CONFLICT_RANGE_IF_NOT_SNAPSHOT,
         ))
     }
 
+    unsafe fn cancel(&self) {
+        // Obviously there is no `cancellation_test_and_set()` here.
+        fdb_sys::fdb_transaction_cancel(self.c_ptr);
+    }
+
     fn get<'t>(&'t self, key: Key) -> FdbFutureMaybeValue<'t> {
+        self.cancellation_test_and_set();
+
         internal::read_transaction::get(self.c_ptr, key, true)
     }
 
     fn get_addresses_for_key<'t>(&'t self, key: Key) -> FdbFutureCStringArray<'t> {
+        self.cancellation_test_and_set();
+
         internal::read_transaction::get_addresses_for_key(self.c_ptr, key)
     }
 
     fn get_estimated_range_size_bytes<'t>(&'t self, range: Range) -> FdbFutureI64<'t> {
+        self.cancellation_test_and_set();
+
         let (begin, end) = range.destructure();
 
         internal::read_transaction::get_estimated_range_size_bytes(self.c_ptr, begin, end)
     }
 
     fn get_key<'t>(&'t self, selector: KeySelector) -> FdbFutureKey<'t> {
+        self.cancellation_test_and_set();
+
         internal::read_transaction::get_key(self.c_ptr, selector, true)
     }
 
@@ -556,6 +663,8 @@ impl ReadTransaction for ReadSnapshot {
         end: KeySelector,
         options: RangeOptions,
     ) -> RangeResult<'t> {
+        self.cancellation_test_and_set();
+
         let transaction = self.c_ptr;
 
         let maybe_fut_key_value_array = fdb_transaction_get_range(
@@ -579,14 +688,21 @@ impl ReadTransaction for ReadSnapshot {
     }
 
     unsafe fn get_read_version<'t>(&'t self) -> FdbFutureI64<'t> {
+        self.cancellation_test_and_set();
+
         internal::read_transaction::get_read_version(self.c_ptr)
     }
 
     fn is_snapshot(&self) -> bool {
+        self.cancellation_test_and_set();
+
         true
     }
 
     unsafe fn on_error<'t>(&'t self, e: FdbError) -> FdbFutureUnit<'t> {
+        // We don't do `cancellation_test_and_set()` as it is part of
+        // retry logic.
+
         FdbFuture::new(
             // Safety: It is safe to unwrap here because if we have a
             // `self: &FdbTransaction`, then `c_ptr` *must* be
@@ -596,10 +712,14 @@ impl ReadTransaction for ReadSnapshot {
     }
 
     fn set_option(&self, option: TransactionOption) -> FdbResult<()> {
+        // We don't do `cancellation_test_and_set()` here.
+
         internal::read_transaction::set_option(self.c_ptr, option)
     }
 
     unsafe fn set_read_version(&self, version: i64) {
+        // We don't do `cancellation_test_and_set()` here.
+
         internal::read_transaction::set_read_version(self.c_ptr, version)
     }
 }

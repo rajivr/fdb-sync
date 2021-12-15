@@ -72,15 +72,6 @@ pub trait Transaction: ReadTransaction {
     /// ranges as if you had cleared the range.
     fn add_write_conflict_range(&self, range: Range) -> FdbResult<()>;
 
-    /// Cancels the [`Transaction`].
-    ///
-    /// # Safety
-    ///
-    /// See [C API] for more details.
-    ///
-    /// [C API]: https://apple.github.io/foundationdb/api-c.html#c.fdb_transaction_cancel
-    unsafe fn cancel(&self);
-
     /// Clears a given key from the database.
     fn clear(&self, key: Key);
 

@@ -18,15 +18,17 @@ fn main() {
     let fdb_database = fdb::open_database(fdb_cluster_file).unwrap();
 
     let (_, tr_version) = fdb_database
-        .run_and_get_versionstamp(|tr| {
+        .run_and_get_versionstamp(None, |tr| {
             let mut t = Tuple::new();
             t.add_string("prefix".to_string());
             t.add_versionstamp(Versionstamp::incomplete(0));
-            tr.mutate(
-                MutationType::SetVersionstampedKey,
-                t.pack_with_versionstamp(Bytes::new())?.into(),
-                Bytes::new(),
-            );
+            unsafe {
+                tr.mutate(
+                    MutationType::SetVersionstampedKey,
+                    t.pack_with_versionstamp(Bytes::new())?.into(),
+                    Bytes::new(),
+                );
+            }
 
             Ok(())
         })
@@ -38,7 +40,7 @@ fn main() {
         });
 
     let vs = fdb_database
-        .run(|tr| {
+        .run(None, |tr| {
             let subspace = Subspace::new(Bytes::new()).subspace(&{
                 let mut t = Tuple::new();
                 t.add_string("prefix".to_string());
